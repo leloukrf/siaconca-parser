@@ -1,0 +1,9 @@
+# Entorno virtual de Python
+.venv/
+
+# Configuraciones locales y llaves secretas de Streamlit
+.streamlit/
+
+# Archivos temporales o de datos de Excel
+*.xlsx
+__pycache__/
