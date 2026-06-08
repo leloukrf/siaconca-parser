@@ -1,0 +1,70 @@
+Paso 1: Instalar Python en la nueva PC
+Si estás en Windows (que es lo más común), sigue estos pasos:
+
+Ve a la página oficial de Python.org y descarga la versión estable actual (te recomiendo Python 3.11 o 3.12; evita la 3.13 de momento por compatibilidad con algunas librerías científicas como Pandas).
+
+CRUCIAL: Al abrir el instalador, marca la casilla que dice "Add python.exe to PATH" en la primera pantalla. Si no marcas esto, la terminal no reconocerá el comando python.
+
+Haz clic en Install Now.
+
+Paso 2: Clonar el Repositorio de GitHub
+Abre tu terminal (PowerShell, CMD o la terminal de VS Code) y muévete a la carpeta donde quieras guardar el proyecto:
+
+Bash
+cd C:\Users\VICTOR\Documents\Proyectos  # O la ruta que prefieras
+git clone https://github.com/TU_USUARIO/TU_REPOSITORIO.git
+cd TU_REPOSITORIO
+Paso 3: Crear un Entorno Virtual (Venv)
+Para evitar que las librerías de este extractor se mezclen con otros proyectos futuros, crea un entorno virtual dentro de la carpeta de tu proyecto:
+
+Bash
+# Crear el entorno virtual llamado '.venv'
+python -m venv .venv
+Ahora debes activarlo según tu terminal:
+
+Si usas PowerShell:
+
+PowerShell
+.venv\Scripts\Activate.ps1
+Si usas CMD clásico:
+
+DOS
+.venv\Scripts\activate.bat
+(Sabrás que está activo porque verás (.venv) al principio de la línea en tu terminal).
+
+Paso 4: Instalar las Dependencias
+Para que no tengas que instalar librería por librería, lo ideal es que crees un archivo de texto llamado requirements.txt en la raíz de tu proyecto (si es que no lo tienes ya en Git). El contenido exacto de ese archivo para este proyecto debe ser:
+
+Plaintext
+streamlit
+pdfplumber
+pandas
+google-genai
+groq
+xlsxwriter
+Con el entorno virtual activo, ejecuta el siguiente comando para instalar todo de un solo golpe:
+
+Bash
+pip install -r requirements.txt
+Paso 5: Configurar las Variables de Entorno (Buenas Prácticas)
+En el código que veníamos usando, las API Keys de Groq y Gemini estaban escritas directamente (hardcoded). Al subir el código a GitHub, eso es peligroso porque cualquiera podría usar tus créditos.
+
+La forma correcta y profesional de manejarlo en local con Streamlit es crear una carpeta llamada .streamlit en la raíz de tu proyecto, y dentro de ella un archivo llamado secrets.toml:
+
+Ini, TOML
+# .streamlit/secrets.toml
+GROQ_API_KEY = "gsk_j6Rb4kr4d18..."
+GEMINI_API_KEY = "AIzaSyDTsGFL..."
+Nota de seguridad: Recuerda agregar .streamlit/secrets.toml a tu archivo .gitignore para que nunca se suba a GitHub.
+
+Para llamarlas en tu código de Streamlit, simplemente reemplazas las líneas de las llaves por esto:
+
+Python
+GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
+GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+Paso 6: Ejecutar la Aplicación
+Una vez que termine la instalación, ya puedes lanzar el extractor local con el comando clásico:
+
+Bash
+streamlit run app.py
+(Cambia app.py por el nombre exacto de tu archivo principal si se llama distinto). Se te abrirá automáticamente el navegador en http://localhost:8501 con tus pestañas listas para procesar las facturas de Dahua. ¡Avisa si te trancas en algún comando!
