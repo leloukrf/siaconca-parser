@@ -626,11 +626,19 @@ with tab3:
                         df_costo_final_out = df_consolidado_m[['codigo', 'costo_final']].copy()
                         df_costo_final_out.columns = ['codigo', 'costo']
 
-                        # Formato 2: cargaMasivaPackageList.xlsx -> Columnas: 'rif', 'codigo', 'cantidad', 'cbms', 'kgs'
+                        # Formato 2: cargaMasivaPackageList.xlsx -> Columnas: 'rif', 'razonSocial', 'codigo', 'descripcion', 'cantidad', 'cbms', 'kgs'
                         rif_proveedor = str(json_factura_m.get("proveedor", {}).get("rif", "S_R")).strip()
-                        df_pl_final_out = df_consolidado_m[['codigo', 'cantidad', 'volumen_cbm', 'peso_bruto_kg']].copy()
+                        razon_social_proveedor = str(json_factura_m.get("proveedor", {}).get("nombre", "S_R")).strip()
+                        
+                        # Nos traemos también 'descripcion' que ya existía en df_consolidado_m
+                        df_pl_final_out = df_consolidado_m[['codigo', 'descripcion', 'cantidad', 'volumen_cbm', 'peso_bruto_kg']].copy()
+                        
+                        # Insertamos ordenadamente las nuevas columnas al inicio
+                        df_pl_final_out.insert(0, 'razonSocial', razon_social_proveedor)
                         df_pl_final_out.insert(0, 'rif', rif_proveedor)
-                        df_pl_final_out.columns = ['rif', 'codigo', 'cantidad', 'cbms', 'kgs']
+                        
+                        # Renombramos explícitamente para que coincida al 100% con tu plantilla nueva
+                        df_pl_final_out.columns = ['rif', 'razonSocial', 'codigo', 'descripcion', 'cantidad', 'cbms', 'kgs']
 
                         st.success("¡Plantillas para carga masiva construidas con éxito!")
                         
