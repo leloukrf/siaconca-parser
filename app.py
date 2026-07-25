@@ -10,7 +10,7 @@ import os  # Requerido para leer las variables de entorno de Render
 
 st.set_page_config(page_title="Siaconca: Extractor Profesional", layout="wide")
 
-st.title("📄 Siaconca: Extractor v6.6 (Línea por Línea Estricto)")
+st.title("📄 Siaconca: Extractor v6.7 (Parseo Seguro - Groq Only)")
 
 # --- CARGA AUTOMÁTICA Y SEGURA DE API KEYS ---
 groq_api_key = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY", "")
@@ -25,6 +25,23 @@ else:
     st.sidebar.markdown(
         "Por favor, añade `GROQ_API_KEY` en la pestaña **Environment** de tu panel de Render."
     )
+
+# --- FUNCIÓN DE PARSEO SEGURO ---
+def parse_monto_seguro(valor):
+    if pd.isna(valor) or valor == '' or valor is None: return 0.0
+    valor_str = str(valor).strip()
+    
+    # Si detecta formato latino (ej: 7,590 o 1.827,02)
+    if re.search(r',\d{2,3}$', valor_str) or ('.' in valor_str and ',' in valor_str and valor_str.rfind(',') > valor_str.rfind('.')):
+        limpio = valor_str.replace('.', '').replace(',', '.')
+    else:
+        # Formato DAHUA estándar (ej: 134.70 o 5,000.00)
+        limpio = valor_str.replace(',', '')
+        
+    try:
+        return float(limpio)
+    except ValueError:
+        return 0.0
 
 # Creamos las tres pestañas operativas
 tab1, tab2, tab3 = st.tabs([
@@ -80,8 +97,8 @@ with tab1:
                     {{
                       "proveedor": {{"nombre": "", "rif": ""}},
                       "numero_documento": "NÚMERO DE FACTURA O PEDIDO",
-                      "ajuste": {{"flete": 0.00, "descuento": 0.00, "recargo": 0.00}},
-                      "totales": {{"total_neto_final": 0.00}}
+                      "ajuste": {{"flete": "0.00", "descuento": "0.00", "recargo": "0.00"}},
+                      "totales": {{"total_neto_final": "0.00"}}
                     }}
                     Texto extraído:
                     {texto_completo}"""
@@ -108,7 +125,7 @@ with tab1:
                         El 'codigo' debe ser el modelo o part number literal y exacto del producto.
                         Schema JSON esperado:
                         {{
-                          "productos": [{{"codigo": "", "descripcion": "", "cantidad": 0, "costo_unitario": 0.00}}]
+                          "productos": [{{"codigo": "", "descripcion": "", "cantidad": 0, "costo_unitario": "0.00"}}]
                         }}
                         Texto del segmento:
                         {texto_chunk}"""
@@ -129,18 +146,24 @@ with tab1:
 
                     items = datos.get("productos", [])
                     ajustes = datos.get("ajuste", {})
-                    flete = float(ajustes.get("flete", 0.0) or 0.0)
-                    descuento = float(ajustes.get("descuento", 0.0) or 0.0)
-                    recargo = float(ajustes.get("recargo", 0.0) or 0.0)
+                    flete = parse_monto_seguro(ajustes.get("flete", "0.0"))
+                    descuento = parse_monto_seguro(ajustes.get("descuento", "0.0"))
+                    recargo = parse_monto_seguro(ajustes.get("recargo", "0.0"))
+                    
+                    datos["ajuste"]["flete"] = flete
+                    datos["ajuste"]["descuento"] = descuento
+                    datos["totales"]["total_neto_final"] = parse_monto_seguro(datos.get("totales", {}).get("total_neto_final", "0.0"))
 
                     if items:
                         df_temp = pd.DataFrame(items)
                         df_temp['codigo'] = df_temp['codigo'].astype(str).str.strip().str.upper().str.replace(r'\s+', '', regex=True)
                         df_temp['cantidad'] = pd.to_numeric(df_temp['cantidad'], errors='coerce').fillna(0)
-                        df_temp['costo_unitario'] = pd.to_numeric(df_temp['costo_unitario'], errors='coerce').fillna(0.0)
+                        
+                        # PARSEO SEGURO DE COSTO
+                        df_temp['costo_unitario'] = df_temp['costo_unitario'].apply(parse_monto_seguro)
                         
                         if flete > 0 or descuento > 0 or recargo > 0:
-                            total_neto_real = float(datos.get("totales", {}).get("total_neto_final", 0.0))
+                            total_neto_real = datos["totales"]["total_neto_final"]
                             suma_bruta = (df_temp['cantidad'] * df_temp['costo_unitario']).sum()
                             factor = total_neto_real / suma_bruta if suma_bruta > 0 else 1.0
                         else:
@@ -245,8 +268,8 @@ with tab2:
                     Schema JSON esperado:
                     {{
                       "numero_documento": "NRO_FACTURA",
-                      "ajuste": {{"flete": 0.00, "descuento": 0.00, "recargo": 0.00}},
-                      "totales": {{"total_neto_final": 0.00}}
+                      "ajuste": {{"flete": "0.00", "descuento": "0.00", "recargo": "0.00"}},
+                      "totales": {{"total_neto_final": "0.00"}}
                     }}
                     Texto:
                     {texto_completo_inv}"""
@@ -267,7 +290,7 @@ with tab2:
                         El 'codigo' debe ser el part number o modelo literal.
                         Schema JSON esperado:
                         {{
-                          "productos": [{{"codigo": "", "descripcion": "", "cantidad": 0, "costo_unitario": 0.00}}]
+                          "productos": [{{"codigo": "", "descripcion": "", "cantidad": 0, "costo_unitario": "0.00"}}]
                         }}
                         Texto:
                         {texto_chunk}"""
@@ -296,7 +319,7 @@ with tab2:
                         El 'codigo' debe ser exactamente el modelo o part number de fábrica.
                         Schema JSON esperado:
                         {{
-                          "productos": [{{"codigo": "", "peso_bruto_kg": 0.00, "peso_neto_kg": 0.00, "volumen_cbm": 0.00}}]
+                          "productos": [{{"codigo": "", "peso_bruto_kg": "0.00", "peso_neto_kg": "0.00", "volumen_cbm": "0.00"}}]
                         }}
                         Texto:
                         {texto_chunk}"""
@@ -318,16 +341,18 @@ with tab2:
                         df_packing['codigo'] = df_packing['codigo'].astype(str).str.strip().str.upper().str.replace(r'\s+', '', regex=True)
 
                         df_factura['cantidad'] = pd.to_numeric(df_factura['cantidad'], errors='coerce').fillna(0)
-                        df_factura['costo_unitario'] = pd.to_numeric(df_factura['costo_unitario'], errors='coerce').fillna(0.0)
+                        
+                        # PARSEO SEGURO AQUÍ
+                        df_factura['costo_unitario'] = df_factura['costo_unitario'].apply(parse_monto_seguro)
 
                         # 2. Aplicación del factor de flete/ajustes
                         ajustes = json_factura.get("ajuste", {})
-                        flete = float(ajustes.get("flete", 0.0) or 0.0)
-                        descuento = float(ajustes.get("descuento", 0.0) or 0.0)
-                        recargo = float(ajustes.get("recargo", 0.0) or 0.0)
+                        flete = parse_monto_seguro(ajustes.get("flete", "0.0"))
+                        descuento = parse_monto_seguro(ajustes.get("descuento", "0.0"))
+                        recargo = parse_monto_seguro(ajustes.get("recargo", "0.0"))
 
                         if flete > 0 or descuento > 0 or recargo > 0:
-                            total_neto_real = float(json_factura.get("totales", {}).get("total_neto_final", 0.0))
+                            total_neto_real = parse_monto_seguro(json_factura.get("totales", {}).get("total_neto_final", "0.0"))
                             suma_bruta = (df_factura['cantidad'] * df_factura['costo_unitario']).sum()
                             factor = total_neto_real / suma_bruta if suma_bruta > 0 else 1.0
                         else:
@@ -339,7 +364,7 @@ with tab2:
                         # 3. Procesar Packing List agrupado por código único
                         for col in ['peso_bruto_kg', 'peso_neto_kg', 'volumen_cbm']:
                             if col in df_packing.columns:
-                                df_packing[col] = pd.to_numeric(df_packing[col], errors='coerce').fillna(0.0)
+                                df_packing[col] = df_packing[col].apply(parse_monto_seguro)
                             else:
                                 df_packing[col] = 0.0
                         
@@ -473,14 +498,13 @@ with tab3:
                     
                     texto_completo_inv_m = "\n".join(paginas_inv_m)
 
-                    # Solicitamos activamente los datos globales incluyendo proveedor y RIF
                     prompt_global_inv_m = f"""Analiza este texto de una FACTURA y extrae EXCLUSIVAMENTE los datos globales de encabezado (proveedor con su RIF), ajustes y totales en formato JSON. No traigas productos aquí.
                     Schema JSON esperado:
                     {{
                       "proveedor": {{"nombre": "", "rif": ""}},
                       "numero_documento": "NRO_FACTURA",
-                      "ajuste": {{"flete": 0.00, "descuento": 0.00, "recargo": 0.00}},
-                      "totales": {{"total_neto_final": 0.00}}
+                      "ajuste": {{"flete": "0.00", "descuento": "0.00", "recargo": "0.00"}},
+                      "totales": {{"total_neto_final": "0.00"}}
                     }}
                     Texto:
                     {texto_completo_inv_m}"""
@@ -501,7 +525,7 @@ with tab3:
                         El 'codigo' debe ser el part number o modelo literal.
                         Schema JSON esperado:
                         {{
-                          "productos": [{{"codigo": "", "descripcion": "", "cantidad": 0, "costo_unitario": 0.00}}]
+                          "productos": [{{"codigo": "", "descripcion": "", "cantidad": 0, "costo_unitario": "0.00"}}]
                         }}
                         Texto:
                         {texto_chunk}"""
@@ -530,7 +554,7 @@ with tab3:
                         El 'codigo' debe ser exactamente el modelo o part number de fábrica.
                         Schema JSON esperado:
                         {{
-                          "productos": [{{"codigo": "", "peso_bruto_kg": 0.00, "peso_neto_kg": 0.00, "volumen_cbm": 0.00}}]
+                          "productos": [{{"codigo": "", "peso_bruto_kg": "0.00", "peso_neto_kg": "0.00", "volumen_cbm": "0.00"}}]
                         }}
                         Texto:
                         {texto_chunk}"""
@@ -552,16 +576,18 @@ with tab3:
                         df_packing_m['codigo'] = df_packing_m['codigo'].astype(str).str.strip().str.upper().str.replace(r'\s+', '', regex=True)
 
                         df_factura_m['cantidad'] = pd.to_numeric(df_factura_m['cantidad'], errors='coerce').fillna(0)
-                        df_factura_m['costo_unitario'] = pd.to_numeric(df_factura_m['costo_unitario'], errors='coerce').fillna(0.0)
+                        
+                        # PARSEO SEGURO AQUÍ
+                        df_factura_m['costo_unitario'] = df_factura_m['costo_unitario'].apply(parse_monto_seguro)
 
                         # 2. Aplicación proporcional de costos (Flete/Recargos)
                         ajustes_m = json_factura_m.get("ajuste", {})
-                        flete_m = float(ajustes_m.get("flete", 0.0) or 0.0)
-                        descuento_m = float(ajustes_m.get("descuento", 0.0) or 0.0)
-                        recargo_m = float(ajustes_m.get("recargo", 0.0) or 0.0)
+                        flete_m = parse_monto_seguro(ajustes_m.get("flete", "0.0"))
+                        descuento_m = parse_monto_seguro(ajustes_m.get("descuento", "0.0"))
+                        recargo_m = parse_monto_seguro(ajustes_m.get("recargo", "0.0"))
 
                         if flete_m > 0 or descuento_m > 0 or recargo_m > 0:
-                            total_neto_real_m = float(json_factura_m.get("totales", {}).get("total_neto_final", 0.0))
+                            total_neto_real_m = parse_monto_seguro(json_factura_m.get("totales", {}).get("total_neto_final", "0.0"))
                             suma_bruta_m = (df_factura_m['cantidad'] * df_factura_m['costo_unitario']).sum()
                             factor_m = total_neto_real_m / suma_bruta_m if suma_bruta_m > 0 else 1.0
                         else:
@@ -569,10 +595,10 @@ with tab3:
                         
                         df_factura_m['costo_final'] = (df_factura_m['costo_unitario'] * factor_m).round(3)
 
-                        # 3. Agrupación del Packing List por código para distribución
+                        # 3. Agrupación del Packing List (Parseo Seguro)
                         for col in ['peso_bruto_kg', 'peso_neto_kg', 'volumen_cbm']:
                             if col in df_packing_m.columns:
-                                df_packing_m[col] = pd.to_numeric(df_packing_m[col], errors='coerce').fillna(0.0)
+                                df_packing_m[col] = df_packing_m[col].apply(parse_monto_seguro)
                             else:
                                 df_packing_m[col] = 0.0
                         
