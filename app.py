@@ -2,7 +2,6 @@ import streamlit as st
 import pdfplumber
 import pandas as pd
 from groq import Groq
-from google import genai
 import json
 import io
 import time
@@ -15,20 +14,16 @@ st.title("📄 Siaconca: Extractor v6.6 (Línea por Línea Estricto)")
 
 # --- CARGA AUTOMÁTICA Y SEGURA DE API KEYS ---
 groq_api_key = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY", "")
-gemini_api_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
 
 # Panel informativo en la barra lateral para validar el estado de conexión
 st.sidebar.header("🛡️ Estado del Servidor Cloud")
-if groq_api_key or gemini_api_key:
+if groq_api_key:
     st.sidebar.success("● Conectado a los servicios de IA")
-    if groq_api_key:
-        st.sidebar.caption("✓ Motor Principal: Groq Activo")
-    if gemini_api_key:
-        st.sidebar.caption("✓ Motor Respaldo: Gemini Activo")
+    st.sidebar.caption("✓ Motor Único: Groq Activo")
 else:
     st.sidebar.error("❌ Falta configuración de llaves")
     st.sidebar.markdown(
-        "Por favor, añade `GROQ_API_KEY` y `GEMINI_API_KEY` en la pestaña **Environment** de tu panel de Render."
+        "Por favor, añade `GROQ_API_KEY` en la pestaña **Environment** de tu panel de Render."
     )
 
 # Creamos las tres pestañas operativas
@@ -40,37 +35,21 @@ tab1, tab2, tab3 = st.tabs([
 
 # --- FUNCIÓN GLOBAL DE CONEXIÓN CON IA ---
 def preguntar_ia(prompt_texto):
-    if not groq_api_key and not gemini_api_key:
-        st.error("⚠️ Error de entorno: No se detectaron las API keys en el servidor de Render. Configúralas en la sección Environment.")
+    if not groq_api_key:
+        st.error("⚠️ Error de entorno: No se detectó la API key de Groq en el servidor de Render. Configúrala en la sección Environment.")
         st.stop()
 
-    if groq_api_key:
-        try:
-            client_groq = Groq(api_key=groq_api_key)
-            res = client_groq.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[{"role": "system", "content": "Return ONLY JSON."}, {"role": "user", "content": prompt_texto}],
-                temperature=0.1, response_format={"type": "json_object"}
-            )
-            return json.loads(res.choices[0].message.content)
-        except Exception as e_groq:
-            if not gemini_api_key:
-                st.error(f"Error crítico en Groq: {e_groq}. No se configuró una llave de respaldo para Gemini.")
-                st.stop()
-
-    if gemini_api_key:
-        try:
-            client_genai = genai.Client(api_key=gemini_api_key)
-            res = client_genai.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=prompt_texto,
-                config={"response_mime_type": "application/json"} 
-            )
-            return json.loads(res.text)
-        except Exception as e_gemini:
-            error_msg = f"Gemini ({e_gemini})" if groq_api_key else f"Groq (No configurada) | Gemini ({e_gemini})"
-            st.error(f"Error crítico en los proveedores de IA: {error_msg}")
-            st.stop()
+    try:
+        client_groq = Groq(api_key=groq_api_key)
+        res = client_groq.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "system", "content": "Return ONLY JSON."}, {"role": "user", "content": prompt_texto}],
+            temperature=0.1, response_format={"type": "json_object"}
+        )
+        return json.loads(res.choices[0].message.content)
+    except Exception as e_groq:
+        st.error(f"Error crítico en Groq: {e_groq}")
+        st.stop()
 
 # =========================================================================
 # PESTAÑA 1: EXTRACTOR SIMPLE
