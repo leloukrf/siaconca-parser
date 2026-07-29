@@ -8,6 +8,7 @@ import time
 import re
 import os
 import requests 
+from google import genai
 
 st.set_page_config(page_title="Siaconca: Extractor Profesional", layout="wide")
 
@@ -60,7 +61,7 @@ tab1, tab2, tab3 = st.tabs([
     "📥 Carga Masiva (Dos Archivos Separados)"
 ])
 
-# --- RED DE REDUNDANCIA EN CASCADA V2 ---
+# --- RED DE REDUNDANCIA EN CASCADA V3 (Modelos Corregidos) ---
 def preguntar_ia(prompt_texto):
     error_log = []
 
@@ -80,34 +81,23 @@ def preguntar_ia(prompt_texto):
     else:
         error_log.append("Groq: Key no configurada.")
 
-    # INTENTO 2: GEMINI (Con Control de Velocidad Integrado)
+    # INTENTO 2: GEMINI (Nativo y con modelo ultra-estable)
     if gemini_api_key:
         try:
-            # Pausa de 4.2 seg para no sobrepasar el límite gratuito de 15 RPM de Gemini
-            time.sleep(4.2) 
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_api_key}"
-            headers = {"Content-Type": "application/json"}
-            data = {
-                "contents": [{"parts": [{"text": "Return ONLY JSON.\n\n" + prompt_texto}]}],
-                "generationConfig": {
-                    "temperature": 0.0,
-                    "responseMimeType": "application/json"
-                }
-            }
-            response_gem = requests.post(url, headers=headers, json=data)
-            
-            if not response_gem.ok:
-                raise Exception(f"Error {response_gem.status_code}: {response_gem.text}")
-                
-            json_response = response_gem.json()
-            content = json_response["candidates"][0]["content"]["parts"][0]["text"]
-            return json.loads(content)
+            time.sleep(4.2) # Pausa obligatoria para no exceder las 15 RPM
+            client_genai = genai.Client(api_key=gemini_api_key)
+            res = client_genai.models.generate_content(
+                model='gemini-1.5-flash', # El modelo Long-Term Support, garantizado que funciona
+                contents="Return ONLY JSON.\n\n" + prompt_texto,
+                config={"response_mime_type": "application/json", "temperature": 0.0} 
+            )
+            return json.loads(res.text)
         except Exception as e:
             error_log.append(f"Gemini falló: {e}")
     else:
         error_log.append("Gemini: Key no configurada.")
 
-    # INTENTO 3: OPENROUTER (Modelo gratuito corregido)
+    # INTENTO 3: OPENROUTER (Modelo gratuito clásico)
     if openrouter_api_key:
         try:
             headers_or = {
@@ -117,7 +107,7 @@ def preguntar_ia(prompt_texto):
                 "X-Title": "Siaconca ERP Extractor"
             }
             data_or = {
-                "model": "meta-llama/llama-3.2-3b-instruct:free",
+                "model": "meta-llama/llama-3.1-8b-instruct:free", # El slug gratuito más duradero
                 "messages": [
                     {"role": "system", "content": "Return ONLY JSON."},
                     {"role": "user", "content": prompt_texto}
@@ -136,7 +126,7 @@ def preguntar_ia(prompt_texto):
     else:
         error_log.append("OpenRouter: Key no configurada.")
 
-    # INTENTO 4: CEREBRAS (Slug corregido)
+    # INTENTO 4: CEREBRAS (Actualizado a 3.3)
     if cerebras_api_key:
         try:
             headers_cer = {
@@ -144,7 +134,7 @@ def preguntar_ia(prompt_texto):
                 "Content-Type": "application/json"
             }
             data_cer = {
-                "model": "llama3.1-70b",
+                "model": "llama-3.3-70b", # Cerebras actualizó sus nodos a la versión 3.3
                 "messages": [
                     {"role": "system", "content": "Return ONLY JSON."},
                     {"role": "user", "content": prompt_texto}
