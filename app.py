@@ -12,25 +12,22 @@ import requests
 
 st.set_page_config(page_title="Siaconca: Extractor Profesional", layout="wide")
 
-st.title("📄 Siaconca: Extractor v8.1 (Filtro Anti-Categorías + Auto Reset)")
+st.title("📄 Siaconca: Extractor v8.2 (Filtro Estricto + Cruce Blindado)")
 
 # --- CARGA AUTOMÁTICA Y SEGURA DE API KEYS ---
 groq_api_key = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY", "")
 gemini_api_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
 openrouter_api_key = os.getenv("OPENROUTER_API_KEY") or st.secrets.get("OPENROUTER_API_KEY", "")
 
-# Inicializador para el reseteo profundo de los File Uploaders
-if "file_key_counter" not in st.session_state:
-    st.session_state.file_key_counter = 0
+# --- SISTEMA DE RESETEO PROFUNDO (Destruye los archivos cacheados) ---
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = str(int(time.time()))
 
-# Panel informativo y BOTÓN DE REINICIO en la barra lateral
 st.sidebar.header("🛡️ Estado y Controles")
 if st.sidebar.button("🧹 Limpiar Todo (Reset)", use_container_width=True, type="primary"):
-    # Limpiamos memoria y avanzamos el contador para reiniciar los uploaders
-    for key in list(st.session_state.keys()):
-        if key != "file_key_counter":
-            del st.session_state[key]
-    st.session_state.file_key_counter += 1
+    # Limpiamos todo el estado menos la llave del uploader, a esa le generamos un ID nuevo
+    st.session_state.clear()
+    st.session_state.uploader_key = str(int(time.time()))
     st.rerun()
 
 st.sidebar.divider()
@@ -43,7 +40,7 @@ if groq_api_key or gemini_api_key or openrouter_api_key:
 else:
     st.sidebar.error("❌ Servidor desconectado. Faltan llaves.")
 
-# --- FUNCIONES DE OPTIMIZACIÓN Y PARSEO SEGURO ---
+# --- FUNCIONES DE OPTIMIZACIÓN Y PARSEO ---
 def optimizar_tokens(texto):
     if not texto: return ""
     return re.sub(r'[ \t]+', ' ', texto).strip()
@@ -63,17 +60,15 @@ def parse_monto_seguro(valor):
     except ValueError:
         return 0.0
 
-# Reducción a 2 Pestañas como fue solicitado
-tab1, tab2 = st.tabs([
-    "📊 Extractor Simple (Solo Factura)", 
-    "📥 Carga Masiva (Factura + Packing List)"
-])
+# Genera una llave de cruce a prueba de balas (sin espacios, guiones, ni minúsculas)
+def normalizar_codigo_cruce(codigo):
+    return re.sub(r'[^A-Z0-9]', '', str(codigo).upper())
 
 # --- RED DE REDUNDANCIA MULTI-MODELO ---
 def preguntar_ia(prompt_texto):
     error_log = []
 
-    # INTENTO 1: GROQ (CON CASCADA INTERNA DE MODELOS)
+    # INTENTO 1: GROQ (CON CASCADA INTERNA)
     if groq_api_key:
         client_groq = Groq(api_key=groq_api_key)
         modelos_groq = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
@@ -141,12 +136,19 @@ def preguntar_ia(prompt_texto):
 
 
 # =========================================================================
+# INTERFAZ - SOLO 2 PESTAÑAS
+# =========================================================================
+tab1, tab2 = st.tabs([
+    "📊 Extractor Simple (Solo Factura)", 
+    "📥 Carga Masiva (Factura + Packing List)"
+])
+
+# =========================================================================
 # PESTAÑA 1: EXTRACTOR SIMPLE
 # =========================================================================
 with tab1:
     st.header("Procesar Factura Individual")
-    # Usamos la key dinámica para que el reset la limpie visualmente
-    archivo_pdf = st.file_uploader("Sube el PDF de la factura", type=["pdf"], key=f"pdf_simple_{st.session_state.file_key_counter}")
+    archivo_pdf = st.file_uploader("Sube el PDF de la factura", type=["pdf"], key=f"pdf_simple_{st.session_state.uploader_key}")
 
     if archivo_pdf:
         if st.button("🚀 Procesar Factura", type="primary", use_container_width=True):
@@ -172,12 +174,10 @@ with tab1:
                     }}
                     Texto extraído:
                     {texto_global}"""
-
                     datos = preguntar_ia(prompt_global)
 
                     productos_totales = []
                     chunks = [paginas_texto[i:i+4] for i in range(0, len(paginas_texto), 4)]
-                    
                     progreso_simple = st.progress(0)
                     status_simple = st.empty()
 
@@ -186,13 +186,11 @@ with tab1:
                         texto_chunk = "\n--- NUEVA PÁGINA ---\n".join(chunk)
                         
                         prompt_productos = f"""Analiza este segmento de factura y extrae TODOS los productos en JSON bajo estas reglas estrictas:
-                        1. IGNORAR ENCABEZADOS: Textos sueltos que agrupan productos (ej. "CRIMPING TOOL", "BARRIER POLE", "CCTV CAMERA") NO SON PRODUCTOS. Omítelos por completo. Un producto REAL siempre tiene una CANTIDAD numérica y un PRECIO unitario.
-                        2. CÓDIGO Y DESCRIPCIÓN: El 'codigo' debe ser exclusivamente el Part Number alfanumérico (ej. 'DH-PFM914'). Si no hay una descripción separada, repite el código exacto en el campo 'descripcion'.
-                        3. EXTRAER LINEA POR LINEA de los productos reales.
-
+                        1. IGNORAR ENCABEZADOS DE CATEGORÍA: Textos como "CRIMPING TOOL", "BARRIER POLE", "CCTV CAMERA", "COMPUTER MONITOR" que NO tienen precio ni cantidad en su línea NO SON PRODUCTOS. Omítelos por completo.
+                        2. CÓDIGO: El 'codigo' debe ser exclusivamente el Part Number alfanumérico (ej. 'DH-PFM914').
                         Schema JSON esperado:
                         {{
-                          "productos": [{{"codigo": "PART NUMBER EXACTO", "descripcion": "PART NUMBER EXACTO", "cantidad": 0, "costo_unitario": "0.00"}}]
+                          "productos": [{{"codigo": "PART NUMBER", "cantidad": 0, "costo_unitario": "0.00"}}]
                         }}
                         Texto del segmento:
                         {texto_chunk}"""
@@ -223,7 +221,11 @@ with tab1:
 
                     if items:
                         df_temp = pd.DataFrame(items)
-                        df_temp['codigo'] = df_temp['codigo'].astype(str).str.strip().str.upper().str.replace(r'\s+', '', regex=True)
+                        df_temp['codigo'] = df_temp['codigo'].astype(str).str.strip().str.upper()
+                        
+                        # FORZAMOS LA DESCRIPCIÓN POR CÓDIGO (Overrides AI hallucinations)
+                        df_temp['descripcion'] = df_temp['codigo']
+                        
                         df_temp['cantidad'] = pd.to_numeric(df_temp['cantidad'], errors='coerce').fillna(0)
                         
                         # Limpiamos items basura que se hayan colado con cantidad 0
@@ -320,9 +322,9 @@ with tab2:
 
     col_files_m = st.columns(2)
     with col_files_m[0]:
-        pdf_inv_m = st.file_uploader("1. Sube la FACTURA (Invoice)", type=["pdf"], key=f"inv_masivo_{st.session_state.file_key_counter}")
+        pdf_inv_m = st.file_uploader("1. Sube la FACTURA (Invoice)", type=["pdf"], key=f"inv_masivo_{st.session_state.uploader_key}")
     with col_files_m[1]:
-        pdf_pl_m = st.file_uploader("2. Sube el PACKING LIST", type=["pdf"], key=f"pl_masivo_{st.session_state.file_key_counter}")
+        pdf_pl_m = st.file_uploader("2. Sube el PACKING LIST", type=["pdf"], key=f"pl_masivo_{st.session_state.uploader_key}")
 
     if pdf_inv_m and pdf_pl_m:
         if st.button("🚀 Procesar y Generar Archivos Masivos", type="primary", use_container_width=True):
@@ -361,10 +363,10 @@ with tab2:
                         
                         prompt_prod_inv_m = f"""Analiza este segmento de FACTURA y extrae TODOS los productos bajo estas reglas:
                         1. IGNORAR ENCABEZADOS: Textos como "CRIMPING TOOL" o "CCTV CAMERA" sin cantidad ni precio NO SON PRODUCTOS. Omítelos totalmente.
-                        2. CÓDIGO Y DESCRIPCIÓN: El 'codigo' debe ser exclusivamente el modelo alfanumérico (ej. 'DH-PFM914'). Si no existe descripción adicional, repite el código.
+                        2. CÓDIGO: El 'codigo' debe ser exclusivamente el modelo alfanumérico (ej. 'DH-PFM914').
                         Schema JSON esperado:
                         {{
-                          "productos": [{{"codigo": "PART NUMBER", "descripcion": "PART NUMBER", "cantidad": 0, "costo_unitario": "0.00"}}]
+                          "productos": [{{"codigo": "PART NUMBER", "cantidad": 0, "costo_unitario": "0.00"}}]
                         }}
                         Texto:
                         {texto_chunk}"""
@@ -391,11 +393,11 @@ with tab2:
                         texto_chunk = "\n--- NUEVA PÁGINA ---\n".join(chunk)
                         
                         prompt_prod_pl_m = f"""Analiza este PACKING LIST y extrae datos logísticos reales.
-                        1. IGNORAR ENCABEZADOS: Textos como "CRIMPING TOOL" sin peso ni volumen NO SON PRODUCTOS.
+                        1. IGNORAR ENCABEZADOS: Textos como "CRIMPING TOOL" sin peso ni volumen NO SON PRODUCTOS. Omítelos.
                         2. CÓDIGO: Extraer exclusivamente el Part Number alfanumérico.
                         Schema JSON esperado:
                         {{
-                          "productos": [{{"codigo": "PART NUMBER", "peso_bruto_kg": "0.00", "peso_neto_kg": "0.00", "volumen_cbm": "0.00"}}]
+                          "productos": [{{"codigo": "PART NUMBER", "peso_bruto_kg": "0.00", "volumen_cbm": "0.00"}}]
                         }}
                         Texto:
                         {texto_chunk}"""
@@ -412,15 +414,30 @@ with tab2:
                     if df_factura_m.empty or df_packing_m.empty:
                         st.error("No se pudieron consolidar las fuentes de datos. Verifica tus PDFs.")
                     else:
-                        df_factura_m['codigo'] = df_factura_m['codigo'].astype(str).str.strip().str.upper().str.replace(r'\s+', '', regex=True)
-                        df_packing_m['codigo'] = df_packing_m['codigo'].astype(str).str.strip().str.upper().str.replace(r'\s+', '', regex=True)
-
+                        # Limpieza inicial de la factura
+                        df_factura_m['codigo'] = df_factura_m['codigo'].astype(str).str.strip().str.upper()
+                        
+                        # FORZAMOS LA DESCRIPCIÓN POR CÓDIGO DE FORMA PROGRAMÁTICA
+                        df_factura_m['descripcion'] = df_factura_m['codigo']
+                        
                         df_factura_m['cantidad'] = pd.to_numeric(df_factura_m['cantidad'], errors='coerce').fillna(0)
-                        
-                        # Limpiamos basura
                         df_factura_m = df_factura_m[df_factura_m['cantidad'] > 0].copy()
-                        
                         df_factura_m['costo_unitario'] = df_factura_m['costo_unitario'].apply(parse_monto_seguro)
+
+                        # Limpieza del Packing List
+                        df_packing_m['codigo'] = df_packing_m['codigo'].astype(str).str.strip().str.upper()
+                        
+                        for col in ['peso_bruto_kg', 'volumen_cbm']:
+                            if col in df_packing_m.columns:
+                                df_packing_m[col] = df_packing_m[col].apply(parse_monto_seguro)
+                            else:
+                                df_packing_m[col] = 0.0
+                        
+                        df_packing_m = df_packing_m[(df_packing_m['peso_bruto_kg'] > 0) | (df_packing_m['volumen_cbm'] > 0)]
+                        
+                        # CREAMOS LA LLAVE DE CRUCE BLINDADA (Ignora diferencias de OCR como espacios o guiones)
+                        df_factura_m['codigo_clean'] = df_factura_m['codigo'].apply(normalizar_codigo_cruce)
+                        df_packing_m['codigo_clean'] = df_packing_m['codigo'].apply(normalizar_codigo_cruce)
 
                         ajustes_m = json_factura_m.get("ajuste", {})
                         flete_m = parse_monto_seguro(ajustes_m.get("flete", "0.0"))
@@ -436,32 +453,23 @@ with tab2:
                         
                         df_factura_m['costo_final'] = (df_factura_m['costo_unitario'] * factor_m).round(3)
 
-                        for col in ['peso_bruto_kg', 'peso_neto_kg', 'volumen_cbm']:
-                            if col in df_packing_m.columns:
-                                df_packing_m[col] = df_packing_m[col].apply(parse_monto_seguro)
-                            else:
-                                df_packing_m[col] = 0.0
-                        
-                        # Filtramos también el packing list para evitar agrupar basuras
-                        df_packing_m = df_packing_m[(df_packing_m['peso_bruto_kg'] > 0) | (df_packing_m['volumen_cbm'] > 0)]
-                        
-                        df_packing_grouped_m = df_packing_m.groupby('codigo', as_index=False).agg({
+                        df_packing_grouped_m = df_packing_m.groupby('codigo_clean', as_index=False).agg({
                             'peso_bruto_kg': 'sum',
-                            'peso_neto_kg': 'sum',
                             'volumen_cbm': 'sum'
                         })
 
-                        df_consolidado_m = pd.merge(df_factura_m, df_packing_grouped_m, on='codigo', how='left')
-                        df_consolidado_m['total_cantidad_codigo'] = df_consolidado_m.groupby('codigo')['cantidad'].transform('sum')
+                        # CRUCE BLINDADO usando la llave limpia
+                        df_consolidado_m = pd.merge(df_factura_m, df_packing_grouped_m, on='codigo_clean', how='left')
+                        df_consolidado_m['total_cantidad_codigo'] = df_consolidado_m.groupby('codigo_clean')['cantidad'].transform('sum')
                         
-                        for col in ['peso_bruto_kg', 'peso_neto_kg', 'volumen_cbm']:
+                        for col in ['peso_bruto_kg', 'volumen_cbm']:
                             df_consolidado_m[col] = df_consolidado_m[col].fillna(0.0)
                             df_consolidado_m[col] = df_consolidado_m.apply(
                                 lambda r: (r[col] * (r['cantidad'] / r['total_cantidad_codigo'])) if r['total_cantidad_codigo'] > 0 else 0.0,
                                 axis=1
                             ).round(4)
 
-                        df_consolidado_m = df_consolidado_m.drop(columns=['total_cantidad_codigo'])
+                        df_consolidado_m = df_consolidado_m.drop(columns=['total_cantidad_codigo', 'codigo_clean'])
                         
                         df_costo_final_out = df_consolidado_m[['codigo', 'costo_final']].copy()
                         df_costo_final_out.columns = ['codigo', 'costo']
@@ -469,12 +477,12 @@ with tab2:
                         rif_proveedor = str(json_factura_m.get("proveedor", {}).get("rif", "S_R")).strip()
                         razon_social_proveedor = str(json_factura_m.get("proveedor", {}).get("nombre", "S_R")).strip()
                         
+                        # Generación Final del Excel de Package List
                         df_pl_final_out = df_consolidado_m[['codigo', 'descripcion', 'cantidad', 'volumen_cbm', 'peso_bruto_kg']].copy()
                         df_pl_final_out.insert(0, 'razonSocial', razon_social_proveedor)
                         df_pl_final_out.insert(0, 'rif', rif_proveedor)
                         df_pl_final_out.columns = ['rif', 'razonSocial', 'codigo', 'descripcion', 'cantidad', 'cbms', 'kgs']
 
-                        # Guardar en memoria RAM de Streamlit
                         st.session_state.tab2_df_costo = df_costo_final_out
                         st.session_state.tab2_df_pl = df_pl_final_out
                         st.session_state.tab2_num_doc = str(json_factura_m.get("numero_documento", "S_N")).strip()
@@ -482,7 +490,6 @@ with tab2:
                 except Exception as e:
                     st.error(f"Error crítico en Extracción Masiva: {e}")
 
-    # Renderizado Persistente (Sobrevive a descargas simultáneas)
     if "tab2_df_costo" in st.session_state:
         df_costo_final_out = st.session_state.tab2_df_costo
         df_pl_final_out = st.session_state.tab2_df_pl
