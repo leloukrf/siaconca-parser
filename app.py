@@ -302,47 +302,18 @@ with tab2:
                     progreso_inv_m = st.progress(0)
                     status_inv_m = st.empty()
 
-                    for idx, chunk in enumerate(chunks_inv_m):
-                        status_inv_m.text(f"⏳ Extrayendo Factura: Página {idx+1}/{len(chunks_inv_m)}...")
-                        
-                        prompt_prod_inv_m = f"""Analiza esta página y extrae TODOS los productos.
-                        REGLAS OBLIGATORIAS:
-                        1. NO TE SALTES NADA: Debes incluir cada producto listado.
-                        2. CÓDIGO DIVIDIDO: Si un Part Number está partido en dos líneas por un salto de línea (ej. termina en guion y sigue abajo), ÚNELO en un solo texto continuo.
-                        3. IGNORAR ENCABEZADOS DE CATEGORÍA.
-                        Schema JSON:
-                        {{ "productos": [{{"codigo": "PART NUMBER", "cantidad": 0, "costo_unitario": "0.00"}}] }}
-                        Texto:
-                        {"\n--- NUEVA PÁGINA ---\n".join(chunk)}"""
-                        
-                        res_chunk = preguntar_ia(prompt_prod_inv_m)
-                        productos_factura_m.extend(res_chunk.get("productos", []))
-                        progreso_inv_m.progress((idx + 1) / len(chunks_inv_m))
-
-                    status_inv_m.empty(); progreso_inv_m.empty()
-
-                    paginas_pl_m = []
-                    with pdfplumber.open(pdf_pl_m) as pdf:
-                        for page in pdf.pages:
-                            text = optimizar_tokens(page.extract_text(layout=False))
-                            if text: paginas_pl_m.append(text + "\n")
-
-                    productos_packing_m = []
-                    # CHUNKING REPARADO: 1 Página a la vez
-                    chunks_pl_m = [paginas_pl_m[i:i+1] for i in range(0, len(paginas_pl_m), 1)]
-                    progreso_pl_m = st.progress(0)
-                    status_pl_m = st.empty()
-
                     for idx, chunk in enumerate(chunks_pl_m):
                         status_pl_m.text(f"⏳ Extrayendo Packing List: Página {idx+1}/{len(chunks_pl_m)}...")
                         
+                        # CORRECCIÓN 1: Se añade "cantidad" al prompt y al schema JSON
                         prompt_prod_pl_m = f"""Analiza esta página del PACKING LIST.
                         REGLAS OBLIGATORIAS:
                         1. EXTRAE TODAS LAS FILAS: No omitas productos como DH-PFM.
                         2. CÓDIGO DIVIDIDO: Si un Part Number está partido en dos líneas, únelo.
-                        3. MAPEADO EXACTO: El Peso Bruto (Gr.wt) asígnalo a la llave 'kgs'. El Volumen (Measurement o CBMS) asígnalo a 'cbms'.
+                        3. CANTIDAD: Extrae obligatoriamente la cantidad de piezas (Quantity / PCS) de cada fila.
+                        4. MAPEADO EXACTO: El Peso Bruto (Gr.wt) asígnalo a la llave 'kgs'. El Volumen (Measurement o CBMS) asígnalo a 'cbms'.
                         Schema JSON:
-                        {{ "productos": [{{"codigo": "PART NUMBER", "kgs": "0.00", "cbms": "0.00"}}] }}
+                        {{ "productos": [{{"codigo": "PART NUMBER", "cantidad": 0, "kgs": "0.00", "cbms": "0.00"}}] }}
                         Texto:
                         {"\n--- NUEVA PÁGINA ---\n".join(chunk)}"""
                         
@@ -358,23 +329,12 @@ with tab2:
                     if df_factura_m.empty or df_packing_m.empty:
                         st.error("Error al consolidar. Verifica tus PDFs.")
                     else:
+                        # --- 1. PROCESAMIENTO Y LIMPIEZA DE LA FACTURA ---
                         df_factura_m['codigo'] = df_factura_m['codigo'].astype(str).str.strip().str.upper()
-                        df_factura_m['descripcion'] = df_factura_m['codigo'] 
+                        df_factura_m['codigo_clean'] = df_factura_m['codigo'].apply(normalizar_codigo_cruce)
                         df_factura_m['cantidad'] = pd.to_numeric(df_factura_m['cantidad'], errors='coerce').fillna(0)
                         df_factura_m = df_factura_m[df_factura_m['cantidad'] > 0].copy()
                         df_factura_m['costo_unitario'] = df_factura_m['costo_unitario'].apply(parse_monto_seguro)
-
-                        df_packing_m['codigo'] = df_packing_m['codigo'].astype(str).str.strip().str.upper()
-                        for col in ['kgs', 'cbms']:
-                            if col in df_packing_m.columns:
-                                df_packing_m[col] = df_packing_m[col].apply(parse_monto_seguro)
-                            else:
-                                df_packing_m[col] = 0.0
-                        
-                        df_packing_m = df_packing_m[(df_packing_m['kgs'] > 0) | (df_packing_m['cbms'] > 0)]
-                        
-                        df_factura_m['codigo_clean'] = df_factura_m['codigo'].apply(normalizar_codigo_cruce)
-                        df_packing_m['codigo_clean'] = df_packing_m['codigo'].apply(normalizar_codigo_cruce)
 
                         ajustes_m = json_factura_m.get("ajuste", {})
                         flete_m = parse_monto_seguro(ajustes_m.get("flete", "0.0"))
@@ -390,36 +350,48 @@ with tab2:
                         
                         df_factura_m['costo_final'] = (df_factura_m['costo_unitario'] * factor_m).round(3)
 
+                        # ARCHIVO DE COSTOS: Agrupamos la factura por si hay duplicados, garantizando 1 costo por código
+                        df_costo_final_out = df_factura_m.groupby('codigo_clean', as_index=False).agg({
+                            'codigo': 'first',
+                            'costo_final': 'mean'
+                        })[['codigo', 'costo_final']].rename(columns={'costo_final': 'costo'})
+
+
+                        # --- 2. PROCESAMIENTO Y LIMPIEZA DEL PACKING LIST ---
+                        df_packing_m['codigo'] = df_packing_m['codigo'].astype(str).str.strip().str.upper()
+                        df_packing_m['codigo_clean'] = df_packing_m['codigo'].apply(normalizar_codigo_cruce)
+                        
+                        # Ahora sí tenemos la columna 'cantidad' extraída del Packing List
+                        df_packing_m['cantidad'] = pd.to_numeric(df_packing_m.get('cantidad', 0), errors='coerce').fillna(0)
+                        df_packing_m['kgs'] = df_packing_m.get('kgs', 0).apply(parse_monto_seguro)
+                        df_packing_m['cbms'] = df_packing_m.get('cbms', 0).apply(parse_monto_seguro)
+
+                        # CORRECCIÓN 2: Agrupación estricta del Packing List para sumar cantidades, cbms y kgs separados.
+                        # Esto consolida el producto sin importar en cuántas partes del PL apareció, blindando los balances al importar.
                         df_packing_grouped_m = df_packing_m.groupby('codigo_clean', as_index=False).agg({
+                            'codigo': 'first',
+                            'cantidad': 'sum',
                             'kgs': 'sum',
                             'cbms': 'sum'
                         })
-
-                        df_consolidado_m = pd.merge(df_factura_m, df_packing_grouped_m, on='codigo_clean', how='left')
-                        df_consolidado_m['total_cantidad_codigo'] = df_consolidado_m.groupby('codigo_clean')['cantidad'].transform('sum')
                         
-                        for col in ['kgs', 'cbms']:
-                            df_consolidado_m[col] = df_consolidado_m[col].fillna(0.0)
-                            df_consolidado_m[col] = df_consolidado_m.apply(
-                                lambda r: (r[col] * (r['cantidad'] / r['total_cantidad_codigo'])) if r['total_cantidad_codigo'] > 0 else 0.0,
-                                axis=1
-                            ).round(4)
+                        # Filtramos cualquier remanente con cantidad cero
+                        df_packing_grouped_m = df_packing_grouped_m[df_packing_grouped_m['cantidad'] > 0]
 
-                        df_consolidado_m = df_consolidado_m.drop(columns=['total_cantidad_codigo', 'codigo_clean'])
-                        
-                        df_costo_final_out = df_consolidado_m[['codigo', 'costo_final']].copy()
-                        df_costo_final_out.columns = ['codigo', 'costo']
-
+                        # --- 3. CONSTRUCCIÓN DEL ARCHIVO PACKING LIST FINAL ---
                         rif_proveedor = str(json_factura_m.get("proveedor", {}).get("rif", "S_R")).strip()
                         razon_social_proveedor = str(json_factura_m.get("proveedor", {}).get("nombre", "S_R")).strip()
                         
-                        df_pl_final_out = df_consolidado_m[['codigo', 'descripcion', 'cantidad', 'cbms', 'kgs']].copy()
+                        df_pl_final_out = df_packing_grouped_m[['codigo', 'cantidad', 'cbms', 'kgs']].copy()
+                        df_pl_final_out['descripcion'] = df_pl_final_out['codigo'] # Puedes cruzar con factura si necesitas mejor descripción
+                        
                         df_pl_final_out.insert(0, 'razonSocial', razon_social_proveedor)
                         df_pl_final_out.insert(0, 'rif', rif_proveedor)
-                        df_pl_final_out.columns = ['rif', 'razonSocial', 'codigo', 'descripcion', 'cantidad', 'cbms', 'kgs']
+                        df_pl_final_out = df_pl_final_out[['rif', 'razonSocial', 'codigo', 'descripcion', 'cantidad', 'cbms', 'kgs']]
 
                         st.session_state.tab2_df_costo = df_costo_final_out
                         st.session_state.tab2_df_pl = df_pl_final_out
+                        st.session_state.tab2_num_doc = str(json_factura_m.get("numero_documento", "S_N")).strip()
                         st.session_state.tab2_num_doc = str(json_factura_m.get("numero_documento", "S_N")).strip()
 
                 except Exception as e:
