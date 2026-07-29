@@ -12,27 +12,34 @@ import requests
 
 st.set_page_config(page_title="Siaconca: Extractor Profesional", layout="wide")
 
-st.title("📄 Siaconca: Extractor v8.0 (Memoria Persistente + Multi-Groq)")
+st.title("📄 Siaconca: Extractor v8.1 (Filtro Anti-Categorías + Auto Reset)")
 
 # --- CARGA AUTOMÁTICA Y SEGURA DE API KEYS ---
 groq_api_key = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY", "")
 gemini_api_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
 openrouter_api_key = os.getenv("OPENROUTER_API_KEY") or st.secrets.get("OPENROUTER_API_KEY", "")
 
+# Inicializador para el reseteo profundo de los File Uploaders
+if "file_key_counter" not in st.session_state:
+    st.session_state.file_key_counter = 0
+
 # Panel informativo y BOTÓN DE REINICIO en la barra lateral
 st.sidebar.header("🛡️ Estado y Controles")
 if st.sidebar.button("🧹 Limpiar Todo (Reset)", use_container_width=True, type="primary"):
+    # Limpiamos memoria y avanzamos el contador para reiniciar los uploaders
     for key in list(st.session_state.keys()):
-        del st.session_state[key]
+        if key != "file_key_counter":
+            del st.session_state[key]
+    st.session_state.file_key_counter += 1
     st.rerun()
 
 st.sidebar.divider()
 
 if groq_api_key or gemini_api_key or openrouter_api_key:
     st.sidebar.success("● Conectado a la Red de IA")
-    if groq_api_key: st.sidebar.caption("1️⃣ Motor Principal: Groq (Cascada Interna)")
-    if gemini_api_key: st.sidebar.caption("2️⃣ Motor Respaldo: Gemini 1.5")
-    if openrouter_api_key: st.sidebar.caption("3️⃣ Motor Emergencia: OpenRouter")
+    if groq_api_key: st.sidebar.caption("1️⃣ Motor: Groq (Cascada de 3 Modelos)")
+    if gemini_api_key: st.sidebar.caption("2️⃣ Motor: Gemini 1.5")
+    if openrouter_api_key: st.sidebar.caption("3️⃣ Motor: OpenRouter")
 else:
     st.sidebar.error("❌ Servidor desconectado. Faltan llaves.")
 
@@ -56,22 +63,21 @@ def parse_monto_seguro(valor):
     except ValueError:
         return 0.0
 
+# Reducción a 2 Pestañas como fue solicitado
 tab1, tab2 = st.tabs([
     "📊 Extractor Simple (Solo Factura)", 
     "📥 Carga Masiva (Factura + Packing List)"
 ])
 
-# --- RED DE REDUNDANCIA: Groq (Múltiples Modelos) -> Gemini -> OpenRouter ---
+# --- RED DE REDUNDANCIA MULTI-MODELO ---
 def preguntar_ia(prompt_texto):
     error_log = []
 
-    # INTENTO 1: GROQ CON CASCADA INTERNA
+    # INTENTO 1: GROQ (CON CASCADA INTERNA DE MODELOS)
     if groq_api_key:
         client_groq = Groq(api_key=groq_api_key)
-        # Lista de modelos de Groq a intentar en orden[cite: 1]
         modelos_groq = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
         
-        exito_groq = False
         for modelo in modelos_groq:
             try:
                 res = client_groq.chat.completions.create(
@@ -83,17 +89,16 @@ def preguntar_ia(prompt_texto):
                 return json.loads(res.choices[0].message.content)
             except Exception as e:
                 err_str = str(e).lower()
-                # Si el error es de límite de tokens (429), pasamos al siguiente modelo de Groq[cite: 1]
                 if 'rate limit' in err_str or '429' in err_str or 'tokens' in err_str:
                     error_log.append(f"Groq ({modelo}) sin tokens. Saltando...")
                     continue
                 else:
-                    error_log.append(f"Groq falló por otro error: {e}")
-                    break # Salimos del bucle Groq si es un error diferente
+                    error_log.append(f"Groq ({modelo}) falló: {e}")
+                    break 
     else:
         error_log.append("Groq: Key no configurada.")
 
-    # INTENTO 2: GEMINI 1.5 FLASH (Estable)
+    # INTENTO 2: GEMINI
     if gemini_api_key:
         try:
             time.sleep(4.2)
@@ -109,39 +114,25 @@ def preguntar_ia(prompt_texto):
     else:
         error_log.append("Gemini: Key no configurada.")
 
-    # INTENTO 3: OPENROUTER (Router gratuito)
+    # INTENTO 3: OPENROUTER
     if openrouter_api_key:
         try:
-            headers_or = {
-                "Authorization": f"Bearer {openrouter_api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://siaconca-extractor.onrender.com",
-                "X-Title": "Siaconca ERP Extractor"
-            }
+            headers_or = {"Authorization": f"Bearer {openrouter_api_key}", "Content-Type": "application/json"}
             data_or = {
                 "model": "openrouter/free", 
-                "messages": [
-                    {"role": "system", "content": "Return ONLY JSON."},
-                    {"role": "user", "content": prompt_texto}
-                ],
+                "messages": [{"role": "system", "content": "Return ONLY JSON."}, {"role": "user", "content": prompt_texto}],
                 "temperature": 0.0
             }
             response_or = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers_or, json=data_or)
             
-            if not response_or.ok:
-                raise Exception(f"Error {response_or.status_code}: {response_or.text}")
-                
-            try:
+            if response_or.ok:
                 content_or = response_or.json()["choices"][0]["message"]["content"]
                 content_or = re.sub(r'^```json\n|\n```$', '', content_or.strip())
                 return json.loads(content_or)
-            except json.JSONDecodeError:
-                raise Exception(f"La API no devolvió JSON válido. Respuesta: {response_or.text[:100]}")
-                
+            else:
+                error_log.append(f"OpenRouter Error HTTP: {response_or.text}")
         except Exception as e:
             error_log.append(f"OpenRouter falló: {e}")
-    else:
-        error_log.append("OpenRouter: Key no configurada.")
 
     # SI TODOS FALLAN
     st.error("❌ Falla masiva: Ningún motor de IA pudo responder.")
@@ -154,12 +145,12 @@ def preguntar_ia(prompt_texto):
 # =========================================================================
 with tab1:
     st.header("Procesar Factura Individual")
-    archivo_pdf = st.file_uploader("Sube el PDF de la factura", type=["pdf"], key="pdf_simple")
+    # Usamos la key dinámica para que el reset la limpie visualmente
+    archivo_pdf = st.file_uploader("Sube el PDF de la factura", type=["pdf"], key=f"pdf_simple_{st.session_state.file_key_counter}")
 
-    # Botón explícito para procesar (evita procesamiento automático al subir o interactuar)
     if archivo_pdf:
         if st.button("🚀 Procesar Factura", type="primary", use_container_width=True):
-            with st.spinner("Extrayendo y estructurando datos..."):
+            with st.spinner("Extrayendo y filtrando datos (Ignorando separadores)..."):
                 try:
                     paginas_texto = []
                     with pdfplumber.open(archivo_pdf) as pdf:
@@ -171,8 +162,7 @@ with tab1:
                     if len(paginas_texto) > 1:
                         texto_global += "\n---\n" + paginas_texto[-1]
 
-                    prompt_global = f"""Analiza este texto de una factura y extrae EXCLUSIVAMENTE los datos globales de encabezado, ajustes y totales en formato JSON. No extraigas la lista de productos aquí.
-                    (Extrae los valores numéricos como texto exacto).
+                    prompt_global = f"""Analiza este texto de una factura y extrae EXCLUSIVAMENTE los datos globales de encabezado, ajustes y totales en JSON. No extraigas la lista de productos aquí.
                     Schema JSON esperado:
                     {{
                       "proveedor": {{"nombre": "", "rif": ""}},
@@ -192,14 +182,17 @@ with tab1:
                     status_simple = st.empty()
 
                     for idx, chunk in enumerate(chunks):
-                        status_simple.text(f"⏳ Extrayendo productos: Bloque {idx+1}/{len(chunks)}...")
+                        status_simple.text(f"⏳ Extrayendo productos reales: Bloque {idx+1}/{len(chunks)}...")
                         texto_chunk = "\n--- NUEVA PÁGINA ---\n".join(chunk)
-                        prompt_productos = f"""Analiza este segmento de texto de una factura y extrae TODOS los productos listados en él en formato JSON.
-                        ⚠️ INSTRUCCIÓN CRÍTICA DE INTEGRIDAD: Extrae CADA FILA O LÍNEA de la tabla exactamente como aparece de forma literal. SI UN MISMO CÓDIGO DE PRODUCTO SE REPETITE EN LÍNEAS DIFERENTES O EN PÁGINAS DISTINTAS (incluso con costos diferentes o el mismo costo), DEBES CREAR UN ELEMENTO SEPARADO EN EL ARRAY PARA CADA FILA. Está estrictamente PROHIBIDO agrupar, consolidar, sumar cantidades o eliminar duplicados de líneas.
-                        El 'codigo' debe ser el modelo o part number literal y exacto del producto. (Extrae 'costo_unitario' como texto exacto).
+                        
+                        prompt_productos = f"""Analiza este segmento de factura y extrae TODOS los productos en JSON bajo estas reglas estrictas:
+                        1. IGNORAR ENCABEZADOS: Textos sueltos que agrupan productos (ej. "CRIMPING TOOL", "BARRIER POLE", "CCTV CAMERA") NO SON PRODUCTOS. Omítelos por completo. Un producto REAL siempre tiene una CANTIDAD numérica y un PRECIO unitario.
+                        2. CÓDIGO Y DESCRIPCIÓN: El 'codigo' debe ser exclusivamente el Part Number alfanumérico (ej. 'DH-PFM914'). Si no hay una descripción separada, repite el código exacto en el campo 'descripcion'.
+                        3. EXTRAER LINEA POR LINEA de los productos reales.
+
                         Schema JSON esperado:
                         {{
-                          "productos": [{{"codigo": "", "descripcion": "", "cantidad": 0, "costo_unitario": "0.00"}}]
+                          "productos": [{{"codigo": "PART NUMBER EXACTO", "descripcion": "PART NUMBER EXACTO", "cantidad": 0, "costo_unitario": "0.00"}}]
                         }}
                         Texto del segmento:
                         {texto_chunk}"""
@@ -232,6 +225,10 @@ with tab1:
                         df_temp = pd.DataFrame(items)
                         df_temp['codigo'] = df_temp['codigo'].astype(str).str.strip().str.upper().str.replace(r'\s+', '', regex=True)
                         df_temp['cantidad'] = pd.to_numeric(df_temp['cantidad'], errors='coerce').fillna(0)
+                        
+                        # Limpiamos items basura que se hayan colado con cantidad 0
+                        df_temp = df_temp[df_temp['cantidad'] > 0].copy()
+                        
                         df_temp['costo_unitario'] = df_temp['costo_unitario'].apply(parse_monto_seguro)
                         
                         if flete > 0 or descuento > 0 or recargo > 0:
@@ -246,19 +243,19 @@ with tab1:
                         
                         datos['productos'] = df_temp.to_dict('records')
 
-                    # Guardar en memoria RAM de Streamlit
+                    # Guardar en memoria RAM persistente
                     st.session_state.tab1_datos = datos
                     st.session_state.tab1_num_doc = num_doc
 
                 except Exception as e:
                     st.error(f"Error crítico en Extracción: {e}")
 
-    # Renderizado Persistente (Sobrevive a descargas)
+    # Renderizado Persistente
     if "tab1_datos" in st.session_state:
         datos = st.session_state.tab1_datos
         num_doc = st.session_state.tab1_num_doc
         
-        st.success("✅ Procesado por completo.")
+        st.success("✅ Procesado por completo y sin encabezados basura.")
         st.info(f"📄 **Documento:** {num_doc} | **Proveedor:** {datos['proveedor']['nombre']}")
         
         col1, col2, col3 = st.columns(3)
@@ -323,13 +320,13 @@ with tab2:
 
     col_files_m = st.columns(2)
     with col_files_m[0]:
-        pdf_inv_m = st.file_uploader("1. Sube la FACTURA (Invoice)", type=["pdf"], key="invoice_masivo")
+        pdf_inv_m = st.file_uploader("1. Sube la FACTURA (Invoice)", type=["pdf"], key=f"inv_masivo_{st.session_state.file_key_counter}")
     with col_files_m[1]:
-        pdf_pl_m = st.file_uploader("2. Sube el PACKING LIST", type=["pdf"], key="packing_masivo")
+        pdf_pl_m = st.file_uploader("2. Sube el PACKING LIST", type=["pdf"], key=f"pl_masivo_{st.session_state.file_key_counter}")
 
     if pdf_inv_m and pdf_pl_m:
         if st.button("🚀 Procesar y Generar Archivos Masivos", type="primary", use_container_width=True):
-            with st.spinner("Ejecutando extracción lineal y estructurando layouts..."):
+            with st.spinner("Ejecutando extracción lineal inteligente..."):
                 try:
                     paginas_inv_m = []
                     with pdfplumber.open(pdf_inv_m) as pdf:
@@ -342,7 +339,6 @@ with tab2:
                         texto_global_inv_m += "\n---\n" + paginas_inv_m[-1]
 
                     prompt_global_inv_m = f"""Analiza este texto de una FACTURA y extrae EXCLUSIVAMENTE los datos globales.
-                    (Extrae valores numéricos como texto exacto).
                     Schema JSON esperado:
                     {{
                       "proveedor": {{"nombre": "", "rif": ""}},
@@ -360,14 +356,15 @@ with tab2:
                     status_inv_m = st.empty()
 
                     for idx, chunk in enumerate(chunks_inv_m):
-                        status_inv_m.text(f"⏳ Extrayendo ítems Invoice: Bloque {idx+1}/{len(chunks_inv_m)}...")
+                        status_inv_m.text(f"⏳ Extrayendo ítems reales de Invoice: Bloque {idx+1}/{len(chunks_inv_m)}...")
                         texto_chunk = "\n--- NUEVA PÁGINA ---\n".join(chunk)
-                        prompt_prod_inv_m = f"""Analiza este segmento de FACTURA y extrae TODOS los productos en JSON.
-                        ⚠️ INSTRUCCIÓN CRÍTICA DE INTEGRIDAD: Extrae CADA FILA O LÍNEA de la tabla exactamente como aparece de forma literal. SI UN MISMO CÓDIGO DE PRODUCTO SE REPETITE EN LÍNEAS DIFERENTES O EN PÁGINAS DISTINTAS (incluso con costos diferentes o el mismo costo), DEBES CREAR UN ELEMENTO SEPARADO EN EL ARRAY PARA CADA FILA. Está estrictamente PROHIBIDO agrupar, consolidar, sumar cantidades o eliminar duplicados de líneas.
-                        El 'codigo' debe ser el part number o modelo literal. (Extrae costo_unitario como texto).
+                        
+                        prompt_prod_inv_m = f"""Analiza este segmento de FACTURA y extrae TODOS los productos bajo estas reglas:
+                        1. IGNORAR ENCABEZADOS: Textos como "CRIMPING TOOL" o "CCTV CAMERA" sin cantidad ni precio NO SON PRODUCTOS. Omítelos totalmente.
+                        2. CÓDIGO Y DESCRIPCIÓN: El 'codigo' debe ser exclusivamente el modelo alfanumérico (ej. 'DH-PFM914'). Si no existe descripción adicional, repite el código.
                         Schema JSON esperado:
                         {{
-                          "productos": [{{"codigo": "", "descripcion": "", "cantidad": 0, "costo_unitario": "0.00"}}]
+                          "productos": [{{"codigo": "PART NUMBER", "descripcion": "PART NUMBER", "cantidad": 0, "costo_unitario": "0.00"}}]
                         }}
                         Texto:
                         {texto_chunk}"""
@@ -390,13 +387,15 @@ with tab2:
                     status_pl_m = st.empty()
 
                     for idx, chunk in enumerate(chunks_pl_m):
-                        status_pl_m.text(f"⏳ Extrayendo empaques Packing List: Bloque {idx+1}/{len(chunks_pl_m)}...")
+                        status_pl_m.text(f"⏳ Extrayendo logística de Packing List: Bloque {idx+1}/{len(chunks_pl_m)}...")
                         texto_chunk = "\n--- NUEVA PÁGINA ---\n".join(chunk)
-                        prompt_prod_pl_m = f"""Analiza este segmento de PACKING LIST y extrae TODOS los datos logísticos en JSON.
-                        El 'codigo' debe ser exactamente el modelo o part number de fábrica. (Extrae medidas como texto exacto).
+                        
+                        prompt_prod_pl_m = f"""Analiza este PACKING LIST y extrae datos logísticos reales.
+                        1. IGNORAR ENCABEZADOS: Textos como "CRIMPING TOOL" sin peso ni volumen NO SON PRODUCTOS.
+                        2. CÓDIGO: Extraer exclusivamente el Part Number alfanumérico.
                         Schema JSON esperado:
                         {{
-                          "productos": [{{"codigo": "", "peso_bruto_kg": "0.00", "peso_neto_kg": "0.00", "volumen_cbm": "0.00"}}]
+                          "productos": [{{"codigo": "PART NUMBER", "peso_bruto_kg": "0.00", "peso_neto_kg": "0.00", "volumen_cbm": "0.00"}}]
                         }}
                         Texto:
                         {texto_chunk}"""
@@ -417,6 +416,10 @@ with tab2:
                         df_packing_m['codigo'] = df_packing_m['codigo'].astype(str).str.strip().str.upper().str.replace(r'\s+', '', regex=True)
 
                         df_factura_m['cantidad'] = pd.to_numeric(df_factura_m['cantidad'], errors='coerce').fillna(0)
+                        
+                        # Limpiamos basura
+                        df_factura_m = df_factura_m[df_factura_m['cantidad'] > 0].copy()
+                        
                         df_factura_m['costo_unitario'] = df_factura_m['costo_unitario'].apply(parse_monto_seguro)
 
                         ajustes_m = json_factura_m.get("ajuste", {})
@@ -438,6 +441,9 @@ with tab2:
                                 df_packing_m[col] = df_packing_m[col].apply(parse_monto_seguro)
                             else:
                                 df_packing_m[col] = 0.0
+                        
+                        # Filtramos también el packing list para evitar agrupar basuras
+                        df_packing_m = df_packing_m[(df_packing_m['peso_bruto_kg'] > 0) | (df_packing_m['volumen_cbm'] > 0)]
                         
                         df_packing_grouped_m = df_packing_m.groupby('codigo', as_index=False).agg({
                             'peso_bruto_kg': 'sum',
@@ -482,7 +488,7 @@ with tab2:
         df_pl_final_out = st.session_state.tab2_df_pl
         num_doc_m = st.session_state.tab2_num_doc
 
-        st.success("¡Plantillas para carga masiva construidas con éxito!")
+        st.success("¡Plantillas para carga masiva construidas y filtradas con éxito!")
         
         st.subheader("📋 Vista de Carga Masiva: Costos")
         st.dataframe(df_costo_final_out, use_container_width=True)
