@@ -2,38 +2,39 @@ import streamlit as st
 import pdfplumber
 import pandas as pd
 from groq import Groq
+from google import genai
 import json
 import io
 import time
 import re
 import os
 import requests 
-from google import genai
 
 st.set_page_config(page_title="Siaconca: Extractor Profesional", layout="wide")
 
-st.title("📄 Siaconca: Extractor v7.2 (Cuádruple Blindaje con Gemini)")
+st.title("📄 Siaconca: Extractor v8.0 (Memoria Persistente + Multi-Groq)")
 
 # --- CARGA AUTOMÁTICA Y SEGURA DE API KEYS ---
 groq_api_key = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY", "")
 gemini_api_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
 openrouter_api_key = os.getenv("OPENROUTER_API_KEY") or st.secrets.get("OPENROUTER_API_KEY", "")
-cerebras_api_key = os.getenv("CEREBRAS_API_KEY") or st.secrets.get("CEREBRAS_API_KEY", "")
 
-# Panel informativo en la barra lateral
-st.sidebar.header("🛡️ Estado del Servidor Cloud")
-if groq_api_key or gemini_api_key or openrouter_api_key or cerebras_api_key:
+# Panel informativo y BOTÓN DE REINICIO en la barra lateral
+st.sidebar.header("🛡️ Estado y Controles")
+if st.sidebar.button("🧹 Limpiar Todo (Reset)", use_container_width=True, type="primary"):
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    st.rerun()
+
+st.sidebar.divider()
+
+if groq_api_key or gemini_api_key or openrouter_api_key:
     st.sidebar.success("● Conectado a la Red de IA")
-    if groq_api_key:
-        st.sidebar.caption("1️⃣ Motor Principal: Groq")
-    if gemini_api_key:
-        st.sidebar.caption("2️⃣ Motor Respaldo: Gemini")
-    if openrouter_api_key:
-        st.sidebar.caption("3️⃣ Motor Emergencia: OpenRouter")
-    if cerebras_api_key:
-        st.sidebar.caption("4️⃣ Motor Emergencia: Cerebras")
+    if groq_api_key: st.sidebar.caption("1️⃣ Motor Principal: Groq (Cascada Interna)")
+    if gemini_api_key: st.sidebar.caption("2️⃣ Motor Respaldo: Gemini 1.5")
+    if openrouter_api_key: st.sidebar.caption("3️⃣ Motor Emergencia: OpenRouter")
 else:
-    st.sidebar.error("❌ Servidor desconectado. Faltan todas las llaves.")
+    st.sidebar.error("❌ Servidor desconectado. Faltan llaves.")
 
 # --- FUNCIONES DE OPTIMIZACIÓN Y PARSEO SEGURO ---
 def optimizar_tokens(texto):
@@ -55,61 +56,60 @@ def parse_monto_seguro(valor):
     except ValueError:
         return 0.0
 
-tab1, tab2, tab3 = st.tabs([
+tab1, tab2 = st.tabs([
     "📊 Extractor Simple (Solo Factura)", 
-    "📦 Consolidado Logístico (Factura + Packing List)", 
-    "📥 Carga Masiva (Dos Archivos Separados)"
+    "📥 Carga Masiva (Factura + Packing List)"
 ])
 
-# --- RED DE REDUNDANCIA EN CASCADA V4 (Slugs 2026 Corregidos) ---
+# --- RED DE REDUNDANCIA: Groq (Múltiples Modelos) -> Gemini -> OpenRouter ---
 def preguntar_ia(prompt_texto):
     error_log = []
 
-    # INTENTO 1: GROQ (El principal, rápido y potente)
+    # INTENTO 1: GROQ CON CASCADA INTERNA
     if groq_api_key:
-        try:
-            client_groq = Groq(api_key=groq_api_key)
-            res = client_groq.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[{"role": "system", "content": "Return ONLY JSON."}, {"role": "user", "content": prompt_texto}],
-                temperature=0.0, 
-                response_format={"type": "json_object"}
-            )
-            return json.loads(res.choices[0].message.content)
-        except Exception as e:
-            error_log.append(f"Groq falló: {e}")
+        client_groq = Groq(api_key=groq_api_key)
+        # Lista de modelos de Groq a intentar en orden[cite: 1]
+        modelos_groq = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
+        
+        exito_groq = False
+        for modelo in modelos_groq:
+            try:
+                res = client_groq.chat.completions.create(
+                    model=modelo,
+                    messages=[{"role": "system", "content": "Return ONLY JSON."}, {"role": "user", "content": prompt_texto}],
+                    temperature=0.0, 
+                    response_format={"type": "json_object"}
+                )
+                return json.loads(res.choices[0].message.content)
+            except Exception as e:
+                err_str = str(e).lower()
+                # Si el error es de límite de tokens (429), pasamos al siguiente modelo de Groq[cite: 1]
+                if 'rate limit' in err_str or '429' in err_str or 'tokens' in err_str:
+                    error_log.append(f"Groq ({modelo}) sin tokens. Saltando...")
+                    continue
+                else:
+                    error_log.append(f"Groq falló por otro error: {e}")
+                    break # Salimos del bucle Groq si es un error diferente
     else:
         error_log.append("Groq: Key no configurada.")
 
-    # INTENTO 2: GEMINI (Actualizado a 2.5 Flash)
+    # INTENTO 2: GEMINI 1.5 FLASH (Estable)
     if gemini_api_key:
         try:
-            time.sleep(4.2) # Pausa de seguridad (10-15 RPM límite)
-            
-            # Usamos la API REST directa para evitar conflictos con versiones viejas del SDK de GenAI
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_api_key}"
-            headers = {"Content-Type": "application/json"}
-            data = {
-                "contents": [{"parts": [{"text": "Return ONLY JSON.\n\n" + prompt_texto}]}],
-                "generationConfig": {
-                    "temperature": 0.0,
-                    "responseMimeType": "application/json"
-                }
-            }
-            response_gem = requests.post(url, headers=headers, json=data)
-            
-            if not response_gem.ok:
-                raise Exception(f"Error {response_gem.status_code}: {response_gem.text}")
-                
-            json_response = response_gem.json()
-            content = json_response["candidates"][0]["content"]["parts"][0]["text"]
-            return json.loads(content)
+            time.sleep(4.2)
+            client_genai = genai.Client(api_key=gemini_api_key)
+            res = client_genai.models.generate_content(
+                model='gemini-1.5-flash', 
+                contents="Return ONLY JSON.\n\n" + prompt_texto,
+                config={"response_mime_type": "application/json", "temperature": 0.0} 
+            )
+            return json.loads(res.text)
         except Exception as e:
             error_log.append(f"Gemini falló: {e}")
     else:
         error_log.append("Gemini: Key no configurada.")
 
-    # INTENTO 3: OPENROUTER (Enrutador Automático Universal)
+    # INTENTO 3: OPENROUTER (Router gratuito)
     if openrouter_api_key:
         try:
             headers_or = {
@@ -119,57 +119,29 @@ def preguntar_ia(prompt_texto):
                 "X-Title": "Siaconca ERP Extractor"
             }
             data_or = {
-                # Usamos el router automático para evitar 404s cuando rotan modelos
                 "model": "openrouter/free", 
                 "messages": [
                     {"role": "system", "content": "Return ONLY JSON."},
                     {"role": "user", "content": prompt_texto}
                 ],
-                "temperature": 0.0,
-                # OpenRouter/free no siempre garantiza soporte para JSON mode estricto dependiendo del modelo seleccionado al azar,
-                # pero el prompt ya exige JSON. Lo dejamos sin response_format estricto para evitar bloqueos del router.
+                "temperature": 0.0
             }
             response_or = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers_or, json=data_or)
             
             if not response_or.ok:
                 raise Exception(f"Error {response_or.status_code}: {response_or.text}")
                 
-            content_or = response_or.json()["choices"][0]["message"]["content"]
-            # Limpiamos posibles bloque de código markdown (```json ... ```)
-            content_or = re.sub(r'^```json\n|\n```$', '', content_or.strip())
-            return json.loads(content_or)
+            try:
+                content_or = response_or.json()["choices"][0]["message"]["content"]
+                content_or = re.sub(r'^```json\n|\n```$', '', content_or.strip())
+                return json.loads(content_or)
+            except json.JSONDecodeError:
+                raise Exception(f"La API no devolvió JSON válido. Respuesta: {response_or.text[:100]}")
+                
         except Exception as e:
             error_log.append(f"OpenRouter falló: {e}")
     else:
         error_log.append("OpenRouter: Key no configurada.")
-
-    # INTENTO 4: CEREBRAS (Modelos gratuitos actuales)
-    if cerebras_api_key:
-        try:
-            headers_cer = {
-                "Authorization": f"Bearer {cerebras_api_key}",
-                "Content-Type": "application/json"
-            }
-            data_cer = {
-                # El modelo principal actual de la capa gratuita (agosto 2026)
-                "model": "zai-glm-4.7", 
-                "messages": [
-                    {"role": "system", "content": "Return ONLY JSON."},
-                    {"role": "user", "content": prompt_texto}
-                ],
-                "temperature": 0.0,
-                "response_format": {"type": "json_object"}
-            }
-            response_cer = requests.post("https://api.cerebras.ai/v1/chat/completions", headers=headers_cer, json=data_cer)
-            
-            if not response_cer.ok:
-                raise Exception(f"Error {response_cer.status_code}: {response_cer.text}")
-                
-            return json.loads(response_cer.json()["choices"][0]["message"]["content"])
-        except Exception as e:
-            error_log.append(f"Cerebras falló: {e}")
-    else:
-        error_log.append("Cerebras: Key no configurada.")
 
     # SI TODOS FALLAN
     st.error("❌ Falla masiva: Ningún motor de IA pudo responder.")
@@ -184,14 +156,10 @@ with tab1:
     st.header("Procesar Factura Individual")
     archivo_pdf = st.file_uploader("Sube el PDF de la factura", type=["pdf"], key="pdf_simple")
 
-    if archivo_pdf and ("archivo_nombre" not in st.session_state or st.session_state.archivo_nombre != archivo_pdf.name):
-        st.session_state.datos_listos = False
-        st.session_state.archivo_nombre = archivo_pdf.name
-
+    # Botón explícito para procesar (evita procesamiento automático al subir o interactuar)
     if archivo_pdf:
-        if not st.session_state.get("datos_listos"):
-            inicio = time.time()
-            with st.spinner("Analizando estructura de la factura..."):
+        if st.button("🚀 Procesar Factura", type="primary", use_container_width=True):
+            with st.spinner("Extrayendo y estructurando datos..."):
                 try:
                     paginas_texto = []
                     with pdfplumber.open(archivo_pdf) as pdf:
@@ -216,7 +184,6 @@ with tab1:
                     {texto_global}"""
 
                     datos = preguntar_ia(prompt_global)
-                    if isinstance(datos, list): datos = datos[0]
 
                     productos_totales = []
                     chunks = [paginas_texto[i:i+4] for i in range(0, len(paginas_texto), 4)]
@@ -225,15 +192,10 @@ with tab1:
                     status_simple = st.empty()
 
                     for idx, chunk in enumerate(chunks):
-                        p_inicio = idx * 4 + 1
-                        p_fin = min((idx + 1) * 4, len(paginas_texto))
-                        status_simple.text(f"⏳ Extrayendo productos: Bloque {idx+1}/{len(chunks)} (Páginas {p_inicio} a {p_fin})...")
-                        
+                        status_simple.text(f"⏳ Extrayendo productos: Bloque {idx+1}/{len(chunks)}...")
                         texto_chunk = "\n--- NUEVA PÁGINA ---\n".join(chunk)
                         prompt_productos = f"""Analiza este segmento de texto de una factura y extrae TODOS los productos listados en él en formato JSON.
-                        
                         ⚠️ INSTRUCCIÓN CRÍTICA DE INTEGRIDAD: Extrae CADA FILA O LÍNEA de la tabla exactamente como aparece de forma literal. SI UN MISMO CÓDIGO DE PRODUCTO SE REPETITE EN LÍNEAS DIFERENTES O EN PÁGINAS DISTINTAS (incluso con costos diferentes o el mismo costo), DEBES CREAR UN ELEMENTO SEPARADO EN EL ARRAY PARA CADA FILA. Está estrictamente PROHIBIDO agrupar, consolidar, sumar cantidades o eliminar duplicados de líneas.
-                        
                         El 'codigo' debe ser el modelo o part number literal y exacto del producto. (Extrae 'costo_unitario' como texto exacto).
                         Schema JSON esperado:
                         {{
@@ -270,7 +232,6 @@ with tab1:
                         df_temp = pd.DataFrame(items)
                         df_temp['codigo'] = df_temp['codigo'].astype(str).str.strip().str.upper().str.replace(r'\s+', '', regex=True)
                         df_temp['cantidad'] = pd.to_numeric(df_temp['cantidad'], errors='coerce').fillna(0)
-                        
                         df_temp['costo_unitario'] = df_temp['costo_unitario'].apply(parse_monto_seguro)
                         
                         if flete > 0 or descuento > 0 or recargo > 0:
@@ -285,303 +246,80 @@ with tab1:
                         
                         datos['productos'] = df_temp.to_dict('records')
 
-                    st.session_state.num_doc = num_doc
-                    st.session_state.datos = datos
-                    st.session_state.datos_listos = True
-                    st.session_state.tiempo = time.time() - inicio
+                    # Guardar en memoria RAM de Streamlit
+                    st.session_state.tab1_datos = datos
+                    st.session_state.tab1_num_doc = num_doc
+
                 except Exception as e:
-                    st.error(f"Error crítico en Pestaña 1: {e}"); st.stop()
+                    st.error(f"Error crítico en Extracción: {e}")
 
-        if st.session_state.get("datos_listos"):
-            st.success(f"✅ Procesado por completo en {st.session_state.tiempo:.2f}s")
-            datos = st.session_state.datos
-            st.info(f"📄 **Documento:** {st.session_state.num_doc} | **Proveedor:** {datos['proveedor']['nombre']}")
+    # Renderizado Persistente (Sobrevive a descargas)
+    if "tab1_datos" in st.session_state:
+        datos = st.session_state.tab1_datos
+        num_doc = st.session_state.tab1_num_doc
+        
+        st.success("✅ Procesado por completo.")
+        st.info(f"📄 **Documento:** {num_doc} | **Proveedor:** {datos['proveedor']['nombre']}")
+        
+        col1, col2, col3 = st.columns(3)
+        with col1: st.metric("Flete", f"$ {datos.get('ajuste', {}).get('flete', 0.0):,.2f}")
+        with col2: st.metric("Descuento", f"$ {datos.get('ajuste', {}).get('descuento', 0.0):,.2f}")
+        with col3: st.metric("TOTAL NETO PDF", f"$ {datos['totales']['total_neto_final']:,.2f}")
+
+        df_display = pd.DataFrame(datos['productos'])[["codigo", "descripcion", "cantidad", "costo_unitario", "costo_final", "subtotal"]]
+        df_display.columns = ["CODIGO", "DESCRIPCION", "CANTIDAD", "COSTO LISTA", "COSTO FINAL", "SUBTOTAL"]
+        
+        st.dataframe(
+            df_display.style.format({"COSTO LISTA": "{:,.3f}", "COSTO FINAL": "{:,.3f}", "SUBTOTAL": "{:,.3f}", "CANTIDAD": "{:,.0f}"})
+            .set_table_styles([{'selector': 'th', 'props': [('background-color', '#D9EAD3'), ('color', 'black'), ('font-weight', 'bold')]}])
+            , use_container_width=True
+        )
+
+        total_calculado_simple = df_display["SUBTOTAL"].sum()
+        col_tot_simple = st.columns([3, 1])
+        with col_tot_simple[1]:
+            st.metric(label="💰 Suma Total Subtotales", value=f"$ {total_calculado_simple:,.2f}")
+
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+            df_display.to_excel(writer, sheet_name='Carga', index=False, startrow=8)
+            wb, ws = writer.book, writer.sheets['Carga']
+            fmt_verde = wb.add_format({'bold': True, 'bg_color': '#D9EAD3', 'border': 1})
+            fmt_normal = wb.add_format({'border': 1})
+            fmt_num = wb.add_format({'border': 1, 'num_format': '#,##0.000'})
+            fmt_header = wb.add_format({'bold': True, 'bg_color': '#D9EAD3', 'border': 1, 'align': 'center'})
+            fmt_total_final = wb.add_format({'bold': True, 'bg_color': '#FFF2CC', 'border': 2, 'num_format': '#,##0.00'})
+
+            ws.write(1, 0, "Nombre / Razón Social:", fmt_verde); ws.write(1, 1, datos['proveedor']['nombre'], fmt_normal)
+            ws.write(2, 0, "RIF / Identificación:", fmt_verde); ws.write(2, 1, datos['proveedor']['rif'], fmt_normal)
+            ws.write(5, 0, "Número de Factura/Pedido:", fmt_verde); ws.write(5, 1, num_doc, fmt_normal)
+            ws.write(6, 0, "Flete Extra:", fmt_verde); ws.write(6, 1, datos.get('ajuste', {}).get('flete', 0.0), fmt_num)
+            ws.write(6, 2, "Descuento:", fmt_verde); ws.write(6, 3, datos.get('ajuste', {}).get('descuento', 0.0), fmt_num)
+
+            ws.set_column('A:A', 30); ws.set_column('B:B', 50); ws.set_column('C:F', 15)
+            for col_num, value in enumerate(df_display.columns.values): ws.write(8, col_num, value, fmt_header)
             
-            col1, col2, col3 = st.columns(3)
-            with col1: st.metric("Flete", f"$ {datos.get('ajuste', {}).get('flete', 0.0):,.2f}")
-            with col2: st.metric("Descuento", f"$ {datos.get('ajuste', {}).get('descuento', 0.0):,.2f}")
-            with col3: st.metric("TOTAL NETO PDF", f"$ {datos['totales']['total_neto_final']:,.2f}")
+            for r_idx, row in enumerate(df_display.values):
+                ws.write(9 + r_idx, 0, row[0], fmt_normal)
+                ws.write(9 + r_idx, 1, row[1], fmt_normal)
+                ws.write(9 + r_idx, 2, row[2], fmt_normal)
+                ws.write(9 + r_idx, 3, row[3], fmt_num)
+                ws.write(9 + r_idx, 4, row[4], fmt_num)
+                ws.write(9 + r_idx, 5, row[5], fmt_num)
 
-            df_display = pd.DataFrame(datos['productos'])[["codigo", "descripcion", "cantidad", "costo_unitario", "costo_final", "subtotal"]]
-            df_display.columns = ["CODIGO", "DESCRIPCION", "CANTIDAD", "COSTO LISTA", "COSTO FINAL", "SUBTOTAL"]
-            
-            st.dataframe(
-                df_display.style.format({"COSTO LISTA": "{:,.3f}", "COSTO FINAL": "{:,.3f}", "SUBTOTAL": "{:,.3f}", "CANTIDAD": "{:,.0f}"})
-                .set_table_styles([{'selector': 'th', 'props': [('background-color', '#D9EAD3'), ('color', 'black'), ('font-weight', 'bold')]}])
-                , use_container_width=True
-            )
+            fila_total = 9 + len(df_display)
+            ws.write(fila_total, 4, "TOTAL CALCULADO:", fmt_verde)
+            ws.write_formula(fila_total, 5, f"=SUM(F10:F{fila_total})", fmt_total_final)
 
-            total_calculado_simple = df_display["SUBTOTAL"].sum()
-            col_tot_simple = st.columns([3, 1])
-            with col_tot_simple[1]:
-                st.metric(label="💰 Suma Total Subtotales", value=f"$ {total_calculado_simple:,.2f}")
-
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                df_display.to_excel(writer, sheet_name='Carga', index=False, startrow=8)
-                wb, ws = writer.book, writer.sheets['Carga']
-                fmt_verde = wb.add_format({'bold': True, 'bg_color': '#D9EAD3', 'border': 1})
-                fmt_normal = wb.add_format({'border': 1})
-                fmt_num = wb.add_format({'border': 1, 'num_format': '#,##0.000'})
-                fmt_header = wb.add_format({'bold': True, 'bg_color': '#D9EAD3', 'border': 1, 'align': 'center'})
-                fmt_total_final = wb.add_format({'bold': True, 'bg_color': '#FFF2CC', 'border': 2, 'num_format': '#,##0.00'})
-
-                ws.write(1, 0, "Nombre / Razón Social:", fmt_verde); ws.write(1, 1, datos['proveedor']['nombre'], fmt_normal)
-                ws.write(2, 0, "RIF / Identificación:", fmt_verde); ws.write(2, 1, datos['proveedor']['rif'], fmt_normal)
-                ws.write(5, 0, "Número de Factura/Pedido:", fmt_verde); ws.write(5, 1, st.session_state.num_doc, fmt_normal)
-                ws.write(6, 0, "Flete Extra:", fmt_verde); ws.write(6, 1, datos.get('ajuste', {}).get('flete', 0.0), fmt_num)
-                ws.write(6, 2, "Descuento:", fmt_verde); ws.write(6, 3, datos.get('ajuste', {}).get('descuento', 0.0), fmt_num)
-
-                ws.set_column('A:A', 30); ws.set_column('B:B', 50); ws.set_column('C:F', 15)
-                for col_num, value in enumerate(df_display.columns.values): ws.write(8, col_num, value, fmt_header)
-                
-                for r_idx, row in enumerate(df_display.values):
-                    ws.write(9 + r_idx, 0, row[0], fmt_normal)
-                    ws.write(9 + r_idx, 1, row[1], fmt_normal)
-                    ws.write(9 + r_idx, 2, row[2], fmt_normal)
-                    ws.write(9 + r_idx, 3, row[3], fmt_num)
-                    ws.write(9 + r_idx, 4, row[4], fmt_num)
-                    ws.write(9 + r_idx, 5, row[5], fmt_num)
-
-                fila_total = 9 + len(df_display)
-                ws.write(fila_total, 4, "TOTAL CALCULADO:", fmt_verde)
-                ws.write_formula(fila_total, 5, f"=SUM(F10:F{fila_total})", fmt_total_final)
-
-            nombre_archivo = f"PEDIDO_{st.session_state.num_doc}.xlsx"
-            st.download_button(f"📥 Descargar {nombre_archivo}", buffer.getvalue(), nombre_archivo, key="btn_simple")
+        nombre_archivo = f"PEDIDO_{num_doc}.xlsx"
+        st.download_button(f"📥 Descargar {nombre_archivo}", buffer.getvalue(), nombre_archivo, key="btn_simple_dl")
 
 # =========================================================================
-# PESTAÑA 2: CONSOLIDADO LOGÍSTICO 
+# PESTAÑA 2: CARGA MASIVA (Factura + Packing List)
 # =========================================================================
 with tab2:
-    st.header("Consolidación por Línea de Factura (Prorrateo Seguro)")
-    st.write("Sube la Factura y el Packing List. Esta versión mantiene cada fila de la factura intacta y distribuye el peso de forma proporcional.")
-
-    col_files = st.columns(2)
-    with col_files[0]:
-        pdf_inv = st.file_uploader("1. Sube la FACTURA (Invoice)", type=["pdf"], key="invoice_union")
-    with col_files[1]:
-        pdf_pl = st.file_uploader("2. Sube el PACKING LIST", type=["pdf"], key="packing_union")
-
-    if pdf_inv and pdf_pl:
-        if st.button("🚀 Cruzar y Consolidar Datos", use_container_width=True):
-            with st.spinner("Analizando documentos de forma independiente..."):
-                try:
-                    paginas_inv = []
-                    with pdfplumber.open(pdf_inv) as pdf:
-                        for page in pdf.pages:
-                            text = optimizar_tokens(page.extract_text(layout=False))
-                            if text: paginas_inv.append(text + "\n")
-                    
-                    texto_global_inv = paginas_inv[0]
-                    if len(paginas_inv) > 1:
-                        texto_global_inv += "\n---\n" + paginas_inv[-1]
-
-                    prompt_global_inv = f"""Analiza este texto de una FACTURA y extrae EXCLUSIVAMENTE los datos globales en JSON. No traigas productos aquí.
-                    (Extrae valores como texto exacto).
-                    Schema JSON esperado:
-                    {{
-                      "numero_documento": "NRO_FACTURA",
-                      "ajuste": {{"flete": "0.00", "descuento": "0.00", "recargo": "0.00"}},
-                      "totales": {{"total_neto_final": "0.00"}}
-                    }}
-                    Texto:
-                    {texto_global_inv}"""
-                    json_factura = preguntar_ia(prompt_global_inv)
-
-                    productos_factura = []
-                    chunks_inv = [paginas_inv[i:i+4] for i in range(0, len(paginas_inv), 4)]
-                    progreso_inv = st.progress(0)
-                    status_inv = st.empty()
-
-                    for idx, chunk in enumerate(chunks_inv):
-                        status_inv.text(f"⏳ Extrayendo ítems Invoice: Bloque {idx+1}/{len(chunks_inv)}...")
-                        texto_chunk = "\n--- NUEVA PÁGINA ---\n".join(chunk)
-                        prompt_prod_inv = f"""Analiza este segmento de FACTURA y extrae TODOS los productos en JSON.
-                        
-                        ⚠️ INSTRUCCIÓN CRÍTICA DE INTEGRIDAD: Extrae CADA FILA O LÍNEA de la tabla exactamente como aparece de forma literal. SI UN MISMO CÓDIGO DE PRODUCTO SE REPETITE EN LÍNEAS DIFERENTES O EN PÁGINAS DISTINTAS (incluso con costos diferentes o el mismo costo), DEBES CREAR UN ELEMENTO SEPARADO EN EL ARRAY PARA CADA FILA. Está estrictamente PROHIBIDO agrupar, consolidar, sumar cantidades o eliminar duplicados de líneas.
-                        
-                        El 'codigo' debe ser el part number o modelo literal. (Extrae costo como texto exacto).
-                        Schema JSON esperado:
-                        {{
-                          "productos": [{{"codigo": "", "descripcion": "", "cantidad": 0, "costo_unitario": "0.00"}}]
-                        }}
-                        Texto:
-                        {texto_chunk}"""
-                        res_chunk = preguntar_ia(prompt_prod_inv)
-                        productos_factura.extend(res_chunk.get("productos", []))
-                        progreso_inv.progress((idx + 1) / len(chunks_inv))
-
-                    status_inv.empty()
-                    progreso_inv.empty()
-
-                    paginas_pl = []
-                    with pdfplumber.open(pdf_pl) as pdf:
-                        for page in pdf.pages:
-                            text = optimizar_tokens(page.extract_text(layout=False))
-                            if text: paginas_pl.append(text + "\n")
-
-                    productos_packing = []
-                    chunks_pl = [paginas_pl[i:i+4] for i in range(0, len(paginas_pl), 4)]
-                    progreso_pl = st.progress(0)
-                    status_pl = st.empty()
-
-                    for idx, chunk in enumerate(chunks_pl):
-                        status_pl.text(f"⏳ Extrayendo empaques Packing List: Bloque {idx+1}/{len(chunks_pl)}...")
-                        texto_chunk = "\n--- NUEVA PÁGINA ---\n".join(chunk)
-                        prompt_prod_pl = f"""Analiza este segmento de PACKING LIST y extrae TODOS los datos logísticos en JSON.
-                        El 'codigo' debe ser exactamente el modelo o part number de fábrica. (Extrae medidas como texto exacto).
-                        Schema JSON esperado:
-                        {{
-                          "productos": [{{"codigo": "", "peso_bruto_kg": "0.00", "peso_neto_kg": "0.00", "volumen_cbm": "0.00"}}]
-                        }}
-                        Texto:
-                        {texto_chunk}"""
-                        res_chunk = preguntar_ia(prompt_prod_pl)
-                        productos_packing.extend(res_chunk.get("productos", []))
-                        progreso_pl.progress((idx + 1) / len(chunks_pl))
-
-                    status_pl.empty()
-                    progreso_pl.empty()
-
-                    df_factura = pd.DataFrame(productos_factura)
-                    df_packing = pd.DataFrame(productos_packing)
-
-                    if df_factura.empty or df_packing.empty:
-                        st.error("No se pudieron consolidar las listas. Verifica la estructura de tus archivos PDF.")
-                    else:
-                        df_factura['codigo'] = df_factura['codigo'].astype(str).str.strip().str.upper().str.replace(r'\s+', '', regex=True)
-                        df_packing['codigo'] = df_packing['codigo'].astype(str).str.strip().str.upper().str.replace(r'\s+', '', regex=True)
-
-                        df_factura['cantidad'] = pd.to_numeric(df_factura['cantidad'], errors='coerce').fillna(0)
-                        
-                        df_factura['costo_unitario'] = df_factura['costo_unitario'].apply(parse_monto_seguro)
-
-                        ajustes = json_factura.get("ajuste", {})
-                        flete = parse_monto_seguro(ajustes.get("flete", "0.0"))
-                        descuento = parse_monto_seguro(ajustes.get("descuento", "0.0"))
-                        recargo = parse_monto_seguro(ajustes.get("recargo", "0.0"))
-
-                        if flete > 0 or descuento > 0 or recargo > 0:
-                            total_neto_real = parse_monto_seguro(json_factura.get("totales", {}).get("total_neto_final", "0.0"))
-                            suma_bruta = (df_factura['cantidad'] * df_factura['costo_unitario']).sum()
-                            factor = total_neto_real / suma_bruta if suma_bruta > 0 else 1.0
-                        else:
-                            factor = 1.0
-                        
-                        df_factura['costo_final'] = (df_factura['costo_unitario'] * factor).round(3)
-                        df_factura['subtotal'] = (df_factura['cantidad'] * df_factura['costo_final']).round(3)
-
-                        for col in ['peso_bruto_kg', 'peso_neto_kg', 'volumen_cbm']:
-                            if col in df_packing.columns:
-                                df_packing[col] = df_packing[col].apply(parse_monto_seguro)
-                            else:
-                                df_packing[col] = 0.0
-                        
-                        df_packing_grouped = df_packing.groupby('codigo', as_index=False).agg({
-                            'peso_bruto_kg': 'sum',
-                            'peso_neto_kg': 'sum',
-                            'volumen_cbm': 'sum'
-                        })
-
-                        df_consolidado = pd.merge(df_factura, df_packing_grouped, on='codigo', how='left')
-                        
-                        df_consolidado['total_cantidad_codigo'] = df_consolidado.groupby('codigo')['cantidad'].transform('sum')
-                        
-                        for col in ['peso_bruto_kg', 'peso_neto_kg', 'volumen_cbm']:
-                            df_consolidado[col] = df_consolidado[col].fillna(0.0)
-                            df_consolidado[col] = df_consolidado.apply(
-                                lambda r: (r[col] * (r['cantidad'] / r['total_cantidad_codigo'])) if r['total_cantidad_codigo'] > 0 else 0.0,
-                                axis=1
-                            ).round(4)
-
-                        df_consolidado = df_consolidado.drop(columns=['total_cantidad_codigo'])
-
-                        df_final_display = df_consolidado[[
-                            "codigo", "descripcion", "cantidad", "costo_unitario", "costo_final", "subtotal", 
-                            "peso_bruto_kg", "peso_neto_kg", "volumen_cbm"
-                        ]]
-                        df_final_display.columns = [
-                            "CODIGO", "DESCRIPCION", "CANTIDAD", "COSTO LISTA", "COSTO FINAL", "SUBTOTAL", 
-                            "PESO BRUTO (KG)", "PESO NETO (KG)", "VOLUMEN (CBM)"
-                        ]
-
-                        st.success("¡Datos consolidados secuencialmente con éxito!")
-                        num_doc_union = json_factura.get("numero_documento", "S_N")
-                        st.info(f"📄 **Nro. Invoice:** {num_doc_union}")
-
-                        st.dataframe(
-                            df_final_display.style.format({
-                                "COSTO LISTA": "{:,.3f}", "COSTO FINAL": "{:,.3f}", "SUBTOTAL": "{:,.3f}", "CANTIDAD": "{:,.0f}",
-                                "PESO BRUTO (KG)": "{:,.2f}", "PESO NETO (KG)": "{:,.2f}", "VOLUMEN (CBM)": "{:,.4f}"
-                            }).set_table_styles([{'selector': 'th', 'props': [('background-color', '#CFE2F3'), ('color', 'black'), ('font-weight', 'bold')]}])
-                            , use_container_width=True
-                        )
-
-                        t_subtotal_log = df_final_display["SUBTOTAL"].sum()
-                        t_bruto_log = df_final_display["PESO BRUTO (KG)"].sum()
-                        t_neto_log = df_final_display["PESO NETO (KG)"].sum()
-                        t_volumen_log = df_final_display["VOLUMEN (CBM)"].sum()
-
-                        c_tot1, c_tot2, c_tot3, c_tot4 = st.columns(4)
-                        with c_tot1: st.metric("💰 Total Subtotales", f"$ {t_subtotal_log:,.2f}")
-                        with c_tot2: st.metric("⚖️ Total Peso Bruto", f"{t_bruto_log:,.2f} KG")
-                        with c_tot3: st.metric("⚖️ Total Peso Neto", f"{t_neto_log:,.2f} KG")
-                        with c_tot4: st.metric("📦 Total Volumen", f"{t_volumen_log:,.4f} CBM")
-
-                        buffer_logistico = io.BytesIO()
-                        with pd.ExcelWriter(buffer_logistico, engine='xlsxwriter') as writer:
-                            df_final_display.to_excel(writer, sheet_name='Consolidado Logistico', index=False, startrow=4)
-                            wb, ws = writer.book, writer.sheets['Consolidado Logistico']
-                            
-                            fmt_azul_header = wb.add_format({'bold': True, 'bg_color': '#CFE2F3', 'border': 1, 'align': 'center'})
-                            fmt_normal = wb.add_format({'border': 1})
-                            fmt_num_tres = wb.add_format({'border': 1, 'num_format': '#,##0.000'})
-                            fmt_num_dos = wb.add_format({'border': 1, 'num_format': '#,##0.00'})
-                            fmt_num_cuatro = wb.add_format({'border': 1, 'num_format': '#,##0.0000'})
-                            
-                            ws.write(0, 0, "CONSOLIDADO DE COSTOS, PESOS Y MEDIDAS (LINEAL)", wb.add_format({'bold': True, 'font_size': 14}))
-                            ws.write(1, 0, f"Invoice Nro: {num_doc_union}", fmt_normal)
-
-                            ws.set_column('A:A', 25); ws.set_column('B:B', 45); ws.set_column('C:F', 15); ws.set_column('G:I', 18) 
-                            
-                            for col_num, value in enumerate(df_final_display.columns.values):
-                                ws.write(4, col_num, value, fmt_azul_header)
-
-                            for r_idx, row in enumerate(df_final_display.values):
-                                ws.write(5 + r_idx, 0, row[0], fmt_normal)
-                                ws.write(5 + r_idx, 1, row[1], fmt_normal)
-                                ws.write(5 + r_idx, 2, row[2], fmt_normal)
-                                ws.write(5 + r_idx, 3, row[3], fmt_num_tres)
-                                ws.write(5 + r_idx, 4, row[4], fmt_num_tres)
-                                ws.write(5 + r_idx, 5, row[5], fmt_num_tres)   
-                                ws.write(5 + r_idx, 6, row[6], fmt_num_dos)    
-                                ws.write(5 + r_idx, 7, row[7], fmt_num_dos)    
-                                ws.write(5 + r_idx, 8, row[8], fmt_num_cuatro) 
-
-                            fila_total_log = 5 + len(df_final_display)
-                            fmt_tot_lbl = wb.add_format({'bold': True, 'border': 1, 'bg_color': '#F2F2F2', 'align': 'right'})
-                            fmt_tot_num2 = wb.add_format({'bold': True, 'border': 2, 'num_format': '#,##0.00', 'bg_color': '#FFF2CC'})
-                            fmt_tot_num4 = wb.add_format({'bold': True, 'border': 2, 'num_format': '#,##0.0000', 'bg_color': '#FFF2CC'})
-
-                            ws.write(fila_total_log, 4, "TOTALES:", fmt_tot_lbl)
-                            ws.write_formula(fila_total_log, 5, f"=SUM(F6:F{fila_total_log})", fmt_tot_num2)
-                            ws.write_formula(fila_total_log, 6, f"=SUM(G6:G{fila_total_log})", fmt_tot_num2)
-                            ws.write_formula(fila_total_log, 7, f"=SUM(H6:H{fila_total_log})", fmt_tot_num2)
-                            ws.write_formula(fila_total_log, 8, f"=SUM(I6:I{fila_total_log})", fmt_tot_num4)
-
-                        nombre_archivo_log = f"CONSOLIDADO_LOGISTICO_{num_doc_union}.xlsx"
-                        st.download_button(f"📥 Descargar {nombre_archivo_log}", buffer_logistico.getvalue(), nombre_archivo_log, key="btn_union")
-                
-                except Exception as e:
-                    st.error(f"Error crítico en el proceso de consolidación: {e}")
-
-# =========================================================================
-# PESTAÑA 3: CARGA MASIVA (DOS ARCHIVOS PLANOS SEPARADOS)
-# =========================================================================
-with tab3:
     st.header("Generador de Plantillas Limpias para Sistema Externo")
-    st.write("Sube la Factura y el Packing List. Esta pestaña procesa las líneas y exporta automáticamente los dos archivos individuales con las columnas exactas requeridas.")
+    st.write("Sube la Factura y el Packing List. Esta pestaña procesa las líneas y exporta automáticamente los dos archivos individuales.")
 
     col_files_m = st.columns(2)
     with col_files_m[0]:
@@ -590,8 +328,8 @@ with tab3:
         pdf_pl_m = st.file_uploader("2. Sube el PACKING LIST", type=["pdf"], key="packing_masivo")
 
     if pdf_inv_m and pdf_pl_m:
-        if st.button("🚀 Procesar y Separar en 2 Archivos Masivos", use_container_width=True):
-            with st.spinner("Ejecutando extracción lineal y estructurando layouts masivos..."):
+        if st.button("🚀 Procesar y Generar Archivos Masivos", type="primary", use_container_width=True):
+            with st.spinner("Ejecutando extracción lineal y estructurando layouts..."):
                 try:
                     paginas_inv_m = []
                     with pdfplumber.open(pdf_inv_m) as pdf:
@@ -603,7 +341,7 @@ with tab3:
                     if len(paginas_inv_m) > 1:
                         texto_global_inv_m += "\n---\n" + paginas_inv_m[-1]
 
-                    prompt_global_inv_m = f"""Analiza este texto de una FACTURA y extrae EXCLUSIVAMENTE los datos globales de encabezado (proveedor con su RIF), ajustes y totales en formato JSON. No traigas productos aquí.
+                    prompt_global_inv_m = f"""Analiza este texto de una FACTURA y extrae EXCLUSIVAMENTE los datos globales.
                     (Extrae valores numéricos como texto exacto).
                     Schema JSON esperado:
                     {{
@@ -625,9 +363,7 @@ with tab3:
                         status_inv_m.text(f"⏳ Extrayendo ítems Invoice: Bloque {idx+1}/{len(chunks_inv_m)}...")
                         texto_chunk = "\n--- NUEVA PÁGINA ---\n".join(chunk)
                         prompt_prod_inv_m = f"""Analiza este segmento de FACTURA y extrae TODOS los productos en JSON.
-                        
                         ⚠️ INSTRUCCIÓN CRÍTICA DE INTEGRIDAD: Extrae CADA FILA O LÍNEA de la tabla exactamente como aparece de forma literal. SI UN MISMO CÓDIGO DE PRODUCTO SE REPETITE EN LÍNEAS DIFERENTES O EN PÁGINAS DISTINTAS (incluso con costos diferentes o el mismo costo), DEBES CREAR UN ELEMENTO SEPARADO EN EL ARRAY PARA CADA FILA. Está estrictamente PROHIBIDO agrupar, consolidar, sumar cantidades o eliminar duplicados de líneas.
-                        
                         El 'codigo' debe ser el part number o modelo literal. (Extrae costo_unitario como texto).
                         Schema JSON esperado:
                         {{
@@ -681,7 +417,6 @@ with tab3:
                         df_packing_m['codigo'] = df_packing_m['codigo'].astype(str).str.strip().str.upper().str.replace(r'\s+', '', regex=True)
 
                         df_factura_m['cantidad'] = pd.to_numeric(df_factura_m['cantidad'], errors='coerce').fillna(0)
-                        
                         df_factura_m['costo_unitario'] = df_factura_m['costo_unitario'].apply(parse_monto_seguro)
 
                         ajustes_m = json_factura_m.get("ajuste", {})
@@ -711,7 +446,6 @@ with tab3:
                         })
 
                         df_consolidado_m = pd.merge(df_factura_m, df_packing_grouped_m, on='codigo', how='left')
-                        
                         df_consolidado_m['total_cantidad_codigo'] = df_consolidado_m.groupby('codigo')['cantidad'].transform('sum')
                         
                         for col in ['peso_bruto_kg', 'peso_neto_kg', 'volumen_cbm']:
@@ -730,47 +464,55 @@ with tab3:
                         razon_social_proveedor = str(json_factura_m.get("proveedor", {}).get("nombre", "S_R")).strip()
                         
                         df_pl_final_out = df_consolidado_m[['codigo', 'descripcion', 'cantidad', 'volumen_cbm', 'peso_bruto_kg']].copy()
-                        
                         df_pl_final_out.insert(0, 'razonSocial', razon_social_proveedor)
                         df_pl_final_out.insert(0, 'rif', rif_proveedor)
-                        
                         df_pl_final_out.columns = ['rif', 'razonSocial', 'codigo', 'descripcion', 'cantidad', 'cbms', 'kgs']
 
-                        st.success("¡Plantillas para carga masiva construidas con éxito!")
-                        
-                        st.subheader("📋 Vista de Carga Masiva: Costos")
-                        st.dataframe(df_costo_final_out, use_container_width=True)
-                        
-                        st.subheader("📋 Vista de Carga Masiva: Package List")
-                        st.dataframe(df_pl_final_out, use_container_width=True)
+                        # Guardar en memoria RAM de Streamlit
+                        st.session_state.tab2_df_costo = df_costo_final_out
+                        st.session_state.tab2_df_pl = df_pl_final_out
+                        st.session_state.tab2_num_doc = str(json_factura_m.get("numero_documento", "S_N")).strip()
 
-                        buffer_masivo_costo = io.BytesIO()
-                        with pd.ExcelWriter(buffer_masivo_costo, engine='xlsxwriter') as writer_costo:
-                            df_costo_final_out.to_excel(writer_costo, index=False, sheet_name='Sheet1')
-                        
-                        buffer_masivo_pl = io.BytesIO()
-                        with pd.ExcelWriter(buffer_masivo_pl, engine='xlsxwriter') as writer_pl:
-                            df_pl_final_out.to_excel(writer_pl, index=False, sheet_name='Sheet1')
-
-                        num_doc_m = str(json_factura_m.get("numero_documento", "S_N")).strip()
-                        
-                        st.markdown("### 📥 Descargar Archivos Listos")
-                        col_dl1, col_dl2 = st.columns(2)
-                        with col_dl1:
-                            st.download_button(
-                                label="📥 Descargar cargaMasivaCosto.xlsx",
-                                data=buffer_masivo_costo.getvalue(),
-                                file_name=f"cargaMasivaCosto_{num_doc_m}.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                key="btn_dl_costo_m"
-                            )
-                        with col_dl2:
-                            st.download_button(
-                                label="📥 Descargar cargaMasivaPackageList.xlsx",
-                                data=buffer_masivo_pl.getvalue(),
-                                file_name=f"cargaMasivaPackageList_{num_doc_m}.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                key="btn_dl_pl_m"
-                            )
                 except Exception as e:
-                    st.error(f"Error crítico construyendo los layouts masivos: {e}")
+                    st.error(f"Error crítico en Extracción Masiva: {e}")
+
+    # Renderizado Persistente (Sobrevive a descargas simultáneas)
+    if "tab2_df_costo" in st.session_state:
+        df_costo_final_out = st.session_state.tab2_df_costo
+        df_pl_final_out = st.session_state.tab2_df_pl
+        num_doc_m = st.session_state.tab2_num_doc
+
+        st.success("¡Plantillas para carga masiva construidas con éxito!")
+        
+        st.subheader("📋 Vista de Carga Masiva: Costos")
+        st.dataframe(df_costo_final_out, use_container_width=True)
+        
+        st.subheader("📋 Vista de Carga Masiva: Package List")
+        st.dataframe(df_pl_final_out, use_container_width=True)
+
+        buffer_masivo_costo = io.BytesIO()
+        with pd.ExcelWriter(buffer_masivo_costo, engine='xlsxwriter') as writer_costo:
+            df_costo_final_out.to_excel(writer_costo, index=False, sheet_name='Sheet1')
+        
+        buffer_masivo_pl = io.BytesIO()
+        with pd.ExcelWriter(buffer_masivo_pl, engine='xlsxwriter') as writer_pl:
+            df_pl_final_out.to_excel(writer_pl, index=False, sheet_name='Sheet1')
+
+        st.markdown("### 📥 Descargar Archivos Listos")
+        col_dl1, col_dl2 = st.columns(2)
+        with col_dl1:
+            st.download_button(
+                label="📥 Descargar cargaMasivaCosto.xlsx",
+                data=buffer_masivo_costo.getvalue(),
+                file_name=f"cargaMasivaCosto_{num_doc_m}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="btn_dl_costo_m_persistente"
+            )
+        with col_dl2:
+            st.download_button(
+                label="📥 Descargar cargaMasivaPackageList.xlsx",
+                data=buffer_masivo_pl.getvalue(),
+                file_name=f"cargaMasivaPackageList_{num_doc_m}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="btn_dl_pl_m_persistente"
+            )
