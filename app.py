@@ -11,31 +11,26 @@ import requests
 
 st.set_page_config(page_title="Siaconca: Extractor Profesional", layout="wide")
 
-st.title("📄 Siaconca: Extractor v7.1 (Triple Blindaje: Groq ➔ OpenRouter ➔ Cerebras)")
+st.title("📄 Siaconca: Extractor v7.2 (Cuádruple Blindaje con Gemini)")
 
 # --- CARGA AUTOMÁTICA Y SEGURA DE API KEYS ---
 groq_api_key = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY", "")
+gemini_api_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
 openrouter_api_key = os.getenv("OPENROUTER_API_KEY") or st.secrets.get("OPENROUTER_API_KEY", "")
 cerebras_api_key = os.getenv("CEREBRAS_API_KEY") or st.secrets.get("CEREBRAS_API_KEY", "")
 
 # Panel informativo en la barra lateral
 st.sidebar.header("🛡️ Estado del Servidor Cloud")
-if groq_api_key or openrouter_api_key or cerebras_api_key:
+if groq_api_key or gemini_api_key or openrouter_api_key or cerebras_api_key:
     st.sidebar.success("● Conectado a la Red de IA")
     if groq_api_key:
-        st.sidebar.caption("1️⃣ Motor Principal: Groq (Activo)")
-    else:
-        st.sidebar.warning("⚠️ Groq inactivo (Falta llave)")
-        
+        st.sidebar.caption("1️⃣ Motor Principal: Groq")
+    if gemini_api_key:
+        st.sidebar.caption("2️⃣ Motor Respaldo: Gemini")
     if openrouter_api_key:
-        st.sidebar.caption("2️⃣ Motor Respaldo: OpenRouter (Activo)")
-    else:
-        st.sidebar.warning("⚠️ OpenRouter inactivo (Falta llave)")
-        
+        st.sidebar.caption("3️⃣ Motor Emergencia: OpenRouter")
     if cerebras_api_key:
-        st.sidebar.caption("3️⃣ Motor Emergencia: Cerebras (Activo)")
-    else:
-        st.sidebar.warning("⚠️ Cerebras inactivo (Falta llave)")
+        st.sidebar.caption("4️⃣ Motor Emergencia: Cerebras")
 else:
     st.sidebar.error("❌ Servidor desconectado. Faltan todas las llaves.")
 
@@ -65,11 +60,11 @@ tab1, tab2, tab3 = st.tabs([
     "📥 Carga Masiva (Dos Archivos Separados)"
 ])
 
-# --- RED DE REDUNDANCIA EN CASCADA (Groq -> OpenRouter -> Cerebras) ---
+# --- RED DE REDUNDANCIA EN CASCADA V2 ---
 def preguntar_ia(prompt_texto):
     error_log = []
 
-    # INTENTO 1: GROQ (El principal, rápido y potente)
+    # INTENTO 1: GROQ
     if groq_api_key:
         try:
             client_groq = Groq(api_key=groq_api_key)
@@ -85,7 +80,34 @@ def preguntar_ia(prompt_texto):
     else:
         error_log.append("Groq: Key no configurada.")
 
-    # INTENTO 2: OPENROUTER (Plan B)
+    # INTENTO 2: GEMINI (Con Control de Velocidad Integrado)
+    if gemini_api_key:
+        try:
+            # Pausa de 4.2 seg para no sobrepasar el límite gratuito de 15 RPM de Gemini
+            time.sleep(4.2) 
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_api_key}"
+            headers = {"Content-Type": "application/json"}
+            data = {
+                "contents": [{"parts": [{"text": "Return ONLY JSON.\n\n" + prompt_texto}]}],
+                "generationConfig": {
+                    "temperature": 0.0,
+                    "responseMimeType": "application/json"
+                }
+            }
+            response_gem = requests.post(url, headers=headers, json=data)
+            
+            if not response_gem.ok:
+                raise Exception(f"Error {response_gem.status_code}: {response_gem.text}")
+                
+            json_response = response_gem.json()
+            content = json_response["candidates"][0]["content"]["parts"][0]["text"]
+            return json.loads(content)
+        except Exception as e:
+            error_log.append(f"Gemini falló: {e}")
+    else:
+        error_log.append("Gemini: Key no configurada.")
+
+    # INTENTO 3: OPENROUTER (Modelo gratuito corregido)
     if openrouter_api_key:
         try:
             headers_or = {
@@ -95,8 +117,7 @@ def preguntar_ia(prompt_texto):
                 "X-Title": "Siaconca ERP Extractor"
             }
             data_or = {
-                # CAMBIO AQUÍ: Usamos el modelo 8B que está garantizado 100% gratis y disponible
-                "model": "meta-llama/llama-3.1-8b-instruct:free",
+                "model": "meta-llama/llama-3.2-3b-instruct:free",
                 "messages": [
                     {"role": "system", "content": "Return ONLY JSON."},
                     {"role": "user", "content": prompt_texto}
@@ -106,7 +127,6 @@ def preguntar_ia(prompt_texto):
             }
             response_or = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers_or, json=data_or)
             
-            # Si hay error 400/404, imprimimos el mensaje real que devuelve OpenRouter para saber por qué
             if not response_or.ok:
                 raise Exception(f"Error {response_or.status_code}: {response_or.text}")
                 
@@ -116,7 +136,7 @@ def preguntar_ia(prompt_texto):
     else:
         error_log.append("OpenRouter: Key no configurada.")
 
-    # INTENTO 3: CEREBRAS (Plan C)
+    # INTENTO 4: CEREBRAS (Slug corregido)
     if cerebras_api_key:
         try:
             headers_cer = {
@@ -124,8 +144,7 @@ def preguntar_ia(prompt_texto):
                 "Content-Type": "application/json"
             }
             data_cer = {
-                # CAMBIO AQUÍ: Identificador exacto validado por la API de Cerebras
-                "model": "llama3.1-8b",
+                "model": "llama3.1-70b",
                 "messages": [
                     {"role": "system", "content": "Return ONLY JSON."},
                     {"role": "user", "content": prompt_texto}
@@ -144,10 +163,11 @@ def preguntar_ia(prompt_texto):
     else:
         error_log.append("Cerebras: Key no configurada.")
 
-    # SI LOS 3 FALLAN
+    # SI TODOS FALLAN
     st.error("❌ Falla masiva: Ningún motor de IA pudo responder.")
     st.code("\n".join(error_log))
     st.stop()
+
 
 # =========================================================================
 # PESTAÑA 1: EXTRACTOR SIMPLE
@@ -515,10 +535,7 @@ with tab2:
                             ws.write(0, 0, "CONSOLIDADO DE COSTOS, PESOS Y MEDIDAS (LINEAL)", wb.add_format({'bold': True, 'font_size': 14}))
                             ws.write(1, 0, f"Invoice Nro: {num_doc_union}", fmt_normal)
 
-                            ws.set_column('A:A', 25)
-                            ws.set_column('B:B', 45)
-                            ws.set_column('C:F', 15) 
-                            ws.set_column('G:I', 18) 
+                            ws.set_column('A:A', 25); ws.set_column('B:B', 45); ws.set_column('C:F', 15); ws.set_column('G:I', 18) 
                             
                             for col_num, value in enumerate(df_final_display.columns.values):
                                 ws.write(4, col_num, value, fmt_azul_header)
