@@ -61,11 +61,11 @@ tab1, tab2, tab3 = st.tabs([
     "📥 Carga Masiva (Dos Archivos Separados)"
 ])
 
-# --- RED DE REDUNDANCIA EN CASCADA V3 (Modelos Corregidos) ---
+# --- RED DE REDUNDANCIA EN CASCADA V4 (Slugs 2026 Corregidos) ---
 def preguntar_ia(prompt_texto):
     error_log = []
 
-    # INTENTO 1: GROQ
+    # INTENTO 1: GROQ (El principal, rápido y potente)
     if groq_api_key:
         try:
             client_groq = Groq(api_key=groq_api_key)
@@ -81,23 +81,35 @@ def preguntar_ia(prompt_texto):
     else:
         error_log.append("Groq: Key no configurada.")
 
-    # INTENTO 2: GEMINI (Nativo y con modelo ultra-estable)
+    # INTENTO 2: GEMINI (Actualizado a 2.5 Flash)
     if gemini_api_key:
         try:
-            time.sleep(4.2) # Pausa obligatoria para no exceder las 15 RPM
-            client_genai = genai.Client(api_key=gemini_api_key)
-            res = client_genai.models.generate_content(
-                model='gemini-1.5-flash', # El modelo Long-Term Support, garantizado que funciona
-                contents="Return ONLY JSON.\n\n" + prompt_texto,
-                config={"response_mime_type": "application/json", "temperature": 0.0} 
-            )
-            return json.loads(res.text)
+            time.sleep(4.2) # Pausa de seguridad (10-15 RPM límite)
+            
+            # Usamos la API REST directa para evitar conflictos con versiones viejas del SDK de GenAI
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_api_key}"
+            headers = {"Content-Type": "application/json"}
+            data = {
+                "contents": [{"parts": [{"text": "Return ONLY JSON.\n\n" + prompt_texto}]}],
+                "generationConfig": {
+                    "temperature": 0.0,
+                    "responseMimeType": "application/json"
+                }
+            }
+            response_gem = requests.post(url, headers=headers, json=data)
+            
+            if not response_gem.ok:
+                raise Exception(f"Error {response_gem.status_code}: {response_gem.text}")
+                
+            json_response = response_gem.json()
+            content = json_response["candidates"][0]["content"]["parts"][0]["text"]
+            return json.loads(content)
         except Exception as e:
             error_log.append(f"Gemini falló: {e}")
     else:
         error_log.append("Gemini: Key no configurada.")
 
-    # INTENTO 3: OPENROUTER (Modelo gratuito clásico)
+    # INTENTO 3: OPENROUTER (Enrutador Automático Universal)
     if openrouter_api_key:
         try:
             headers_or = {
@@ -107,26 +119,31 @@ def preguntar_ia(prompt_texto):
                 "X-Title": "Siaconca ERP Extractor"
             }
             data_or = {
-                "model": "meta-llama/llama-3.1-8b-instruct:free", # El slug gratuito más duradero
+                # Usamos el router automático para evitar 404s cuando rotan modelos
+                "model": "openrouter/free", 
                 "messages": [
                     {"role": "system", "content": "Return ONLY JSON."},
                     {"role": "user", "content": prompt_texto}
                 ],
                 "temperature": 0.0,
-                "response_format": {"type": "json_object"}
+                # OpenRouter/free no siempre garantiza soporte para JSON mode estricto dependiendo del modelo seleccionado al azar,
+                # pero el prompt ya exige JSON. Lo dejamos sin response_format estricto para evitar bloqueos del router.
             }
             response_or = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers_or, json=data_or)
             
             if not response_or.ok:
                 raise Exception(f"Error {response_or.status_code}: {response_or.text}")
                 
-            return json.loads(response_or.json()["choices"][0]["message"]["content"])
+            content_or = response_or.json()["choices"][0]["message"]["content"]
+            # Limpiamos posibles bloque de código markdown (```json ... ```)
+            content_or = re.sub(r'^```json\n|\n```$', '', content_or.strip())
+            return json.loads(content_or)
         except Exception as e:
             error_log.append(f"OpenRouter falló: {e}")
     else:
         error_log.append("OpenRouter: Key no configurada.")
 
-    # INTENTO 4: CEREBRAS (Actualizado a 3.3)
+    # INTENTO 4: CEREBRAS (Modelos gratuitos actuales)
     if cerebras_api_key:
         try:
             headers_cer = {
@@ -134,7 +151,8 @@ def preguntar_ia(prompt_texto):
                 "Content-Type": "application/json"
             }
             data_cer = {
-                "model": "llama-3.3-70b", # Cerebras actualizó sus nodos a la versión 3.3
+                # El modelo principal actual de la capa gratuita (agosto 2026)
+                "model": "zai-glm-4.7", 
                 "messages": [
                     {"role": "system", "content": "Return ONLY JSON."},
                     {"role": "user", "content": prompt_texto}
