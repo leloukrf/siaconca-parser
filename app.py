@@ -6,36 +6,35 @@ import json
 import io
 import time
 import re
-import os  # Requerido para leer las variables de entorno de Render
+import os
 
 st.set_page_config(page_title="Siaconca: Extractor Profesional", layout="wide")
 
-st.title("📄 Siaconca: Extractor v6.7 (Parseo Seguro - Groq Only)")
+st.title("📄 Siaconca: Extractor v6.8 (Token Saver - Groq Only)")
 
-# --- CARGA AUTOMÁTICA Y SEGURA DE API KEYS ---
+# --- CARGA AUTOMÁTICA DE API KEYS ---
 groq_api_key = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY", "")
 
-# Panel informativo en la barra lateral para validar el estado de conexión
 st.sidebar.header("🛡️ Estado del Servidor Cloud")
 if groq_api_key:
     st.sidebar.success("● Conectado a los servicios de IA")
     st.sidebar.caption("✓ Motor Único: Groq Activo")
 else:
     st.sidebar.error("❌ Falta configuración de llaves")
-    st.sidebar.markdown(
-        "Por favor, añade `GROQ_API_KEY` en la pestaña **Environment** de tu panel de Render."
-    )
 
-# --- FUNCIÓN DE PARSEO SEGURO ---
+# --- FUNCIONES DE OPTIMIZACIÓN Y PARSEO ---
+def optimizar_tokens(texto):
+    """Elimina espacios repetidos y tabulaciones inútiles para ahorrar miles de tokens en el payload"""
+    if not texto: return ""
+    return re.sub(r'[ \t]+', ' ', texto).strip()
+
 def parse_monto_seguro(valor):
     if pd.isna(valor) or valor == '' or valor is None: return 0.0
     valor_str = str(valor).strip()
     
-    # Si detecta formato latino (ej: 7,590 o 1.827,02)
     if re.search(r',\d{2,3}$', valor_str) or ('.' in valor_str and ',' in valor_str and valor_str.rfind(',') > valor_str.rfind('.')):
         limpio = valor_str.replace('.', '').replace(',', '.')
     else:
-        # Formato DAHUA estándar (ej: 134.70 o 5,000.00)
         limpio = valor_str.replace(',', '')
         
     try:
@@ -43,25 +42,24 @@ def parse_monto_seguro(valor):
     except ValueError:
         return 0.0
 
-# Creamos las tres pestañas operativas
 tab1, tab2, tab3 = st.tabs([
     "📊 Extractor Simple (Solo Factura)", 
     "📦 Consolidado Logístico (Factura + Packing List)", 
     "📥 Carga Masiva (Dos Archivos Separados)"
 ])
 
-# --- FUNCIÓN GLOBAL DE CONEXIÓN CON IA ---
 def preguntar_ia(prompt_texto):
     if not groq_api_key:
-        st.error("⚠️ Error de entorno: No se detectó la API key de Groq en el servidor de Render. Configúrala en la sección Environment.")
+        st.error("⚠️ Falta API key de Groq.")
         st.stop()
 
     try:
         client_groq = Groq(api_key=groq_api_key)
         res = client_groq.chat.completions.create(
+            # TIP: Si llegas al límite de 100k con este, cámbialo por "llama-3.1-8b-instant" para seguir trabajando hoy
             model="llama-3.3-70b-versatile",
             messages=[{"role": "system", "content": "Return ONLY JSON."}, {"role": "user", "content": prompt_texto}],
-            temperature=0.1, response_format={"type": "json_object"}
+            temperature=0.0, response_format={"type": "json_object"}
         )
         return json.loads(res.choices[0].message.content)
     except Exception as e_groq:
@@ -82,26 +80,22 @@ with tab1:
     if archivo_pdf:
         if not st.session_state.get("datos_listos"):
             inicio = time.time()
-            with st.spinner("Analizando estructura de la factura..."):
+            with st.spinner("Analizando estructura de la factura (Optimizando tokens)..."):
                 try:
                     paginas_texto = []
                     with pdfplumber.open(archivo_pdf) as pdf:
                         for page in pdf.pages:
-                            text = page.extract_text(layout=False)
+                            text = optimizar_tokens(page.extract_text(layout=False))
                             if text: paginas_texto.append(text + "\n")
 
-                    texto_completo = "\n".join(paginas_texto)
+                    # OPTIMIZACIÓN: Solo mandamos la P1 y la última página para ahorrar tokens
+                    texto_global = paginas_texto[0]
+                    if len(paginas_texto) > 1:
+                        texto_global += "\n---\n" + paginas_texto[-1]
 
-                    prompt_global = f"""Analiza este texto de una factura y extrae EXCLUSIVAMENTE los datos globales de encabezado, ajustes y totales en formato JSON. No extraigas la lista de productos aquí.
-                    Schema JSON esperado:
-                    {{
-                      "proveedor": {{"nombre": "", "rif": ""}},
-                      "numero_documento": "NÚMERO DE FACTURA O PEDIDO",
-                      "ajuste": {{"flete": "0.00", "descuento": "0.00", "recargo": "0.00"}},
-                      "totales": {{"total_neto_final": "0.00"}}
-                    }}
-                    Texto extraído:
-                    {texto_completo}"""
+                    prompt_global = f"""Extrae EXCLUSIVAMENTE datos globales.
+                    Schema: {{"proveedor": {{"nombre": "", "rif": ""}}, "numero_documento": "", "ajuste": {{"flete": "0.00", "descuento": "0.00", "recargo": "0.00"}}, "totales": {{"total_neto_final": "0.00"}}}}
+                    Texto: {texto_global}"""
 
                     datos = preguntar_ia(prompt_global)
                     if isinstance(datos, list): datos = datos[0]
@@ -115,20 +109,12 @@ with tab1:
                     for idx, chunk in enumerate(chunks):
                         p_inicio = idx * 4 + 1
                         p_fin = min((idx + 1) * 4, len(paginas_texto))
-                        status_simple.text(f"⏳ Extrayendo productos: Bloque {idx+1}/{len(chunks)} (Páginas {p_inicio} a {p_fin})...")
+                        status_simple.text(f"⏳ Extrayendo productos: Bloque {idx+1}/{len(chunks)}...")
                         
-                        texto_chunk = "\n--- NUEVA PÁGINA ---\n".join(chunk)
-                        prompt_productos = f"""Analiza este segmento de texto de una factura y extrae TODOS los productos listados en él en formato JSON.
-                        
-                        ⚠️ INSTRUCCIÓN CRÍTICA DE INTEGRIDAD: Extrae CADA FILA O LÍNEA de la tabla exactamente como aparece de forma literal. SI UN MISMO CÓDIGO DE PRODUCTO SE REPETITE EN LÍNEAS DIFERENTES O EN PÁGINAS DISTINTAS (incluso con costos diferentes o el mismo costo), DEBES CREAR UN ELEMENTO SEPARADO EN EL ARRAY PARA CADA FILA. Está estrictamente PROHIBIDO agrupar, consolidar, sumar cantidades o eliminar duplicados de líneas.
-                        
-                        El 'codigo' debe ser el modelo o part number literal y exacto del producto.
-                        Schema JSON esperado:
-                        {{
-                          "productos": [{{"codigo": "", "descripcion": "", "cantidad": 0, "costo_unitario": "0.00"}}]
-                        }}
-                        Texto del segmento:
-                        {texto_chunk}"""
+                        texto_chunk = "\n---\n".join(chunk)
+                        prompt_productos = f"""Extrae CADA LÍNEA de la tabla como un elemento separado. NO consolides.
+                        Schema: {{"productos": [{{"codigo": "", "descripcion": "", "cantidad": 0, "costo_unitario": "0.00"}}]}}
+                        Texto: {texto_chunk}"""
 
                         res_chunk = preguntar_ia(prompt_productos)
                         productos_totales.extend(res_chunk.get("productos", []))
@@ -159,7 +145,6 @@ with tab1:
                         df_temp['codigo'] = df_temp['codigo'].astype(str).str.strip().str.upper().str.replace(r'\s+', '', regex=True)
                         df_temp['cantidad'] = pd.to_numeric(df_temp['cantidad'], errors='coerce').fillna(0)
                         
-                        # PARSEO SEGURO DE COSTO
                         df_temp['costo_unitario'] = df_temp['costo_unitario'].apply(parse_monto_seguro)
                         
                         if flete > 0 or descuento > 0 or recargo > 0:
@@ -240,7 +225,7 @@ with tab1:
             st.download_button(f"📥 Descargar {nombre_archivo}", buffer.getvalue(), nombre_archivo, key="btn_simple")
 
 # =========================================================================
-# PESTAÑA 2: CONSOLIDADO LOGÍSTICO (v6.5 - PRESERVACIÓN ESTRICTA DE FILAS)
+# PESTAÑA 2: CONSOLIDADO LOGÍSTICO 
 # =========================================================================
 with tab2:
     st.header("Consolidación por Línea de Factura (Prorrateo Seguro)")
@@ -259,20 +244,16 @@ with tab2:
                     paginas_inv = []
                     with pdfplumber.open(pdf_inv) as pdf:
                         for page in pdf.pages:
-                            text = page.extract_text(layout=False)
+                            text = optimizar_tokens(page.extract_text(layout=False))
                             if text: paginas_inv.append(text + "\n")
                     
-                    texto_completo_inv = "\n".join(paginas_inv)
+                    # OPTIMIZACIÓN GLOBALES
+                    texto_global_inv = paginas_inv[0]
+                    if len(paginas_inv) > 1: texto_global_inv += "\n---\n" + paginas_inv[-1]
 
-                    prompt_global_inv = f"""Analiza este texto de una FACTURA y extrae EXCLUSIVAMENTE los datos globales en JSON. No traigas productos aquí.
-                    Schema JSON esperado:
-                    {{
-                      "numero_documento": "NRO_FACTURA",
-                      "ajuste": {{"flete": "0.00", "descuento": "0.00", "recargo": "0.00"}},
-                      "totales": {{"total_neto_final": "0.00"}}
-                    }}
-                    Texto:
-                    {texto_completo_inv}"""
+                    prompt_global_inv = f"""Extrae EXCLUSIVAMENTE datos globales en JSON.
+                    Schema: {{"numero_documento": "", "ajuste": {{"flete": "0.00", "descuento": "0.00", "recargo": "0.00"}}, "totales": {{"total_neto_final": "0.00"}}}}
+                    Texto: {texto_global_inv}"""
                     json_factura = preguntar_ia(prompt_global_inv)
 
                     productos_factura = []
@@ -282,18 +263,10 @@ with tab2:
 
                     for idx, chunk in enumerate(chunks_inv):
                         status_inv.text(f"⏳ Extrayendo ítems Invoice: Bloque {idx+1}/{len(chunks_inv)}...")
-                        texto_chunk = "\n--- NUEVA PÁGINA ---\n".join(chunk)
-                        prompt_prod_inv = f"""Analiza este segmento de FACTURA y extrae TODOS los productos en JSON.
-                        
-                        ⚠️ INSTRUCCIÓN CRÍTICA DE INTEGRIDAD: Extrae CADA FILA O LÍNEA de la tabla exactamente como aparece de forma literal. SI UN MISMO CÓDIGO DE PRODUCTO SE REPETITE EN LÍNEAS DIFERENTES O EN PÁGINAS DISTINTAS (incluso con costos diferentes o el mismo costo), DEBES CREAR UN ELEMENTO SEPARADO EN EL ARRAY PARA CADA FILA. Está estrictamente PROHIBIDO agrupar, consolidar, sumar cantidades o eliminar duplicados de líneas.
-                        
-                        El 'codigo' debe ser el part number o modelo literal.
-                        Schema JSON esperado:
-                        {{
-                          "productos": [{{"codigo": "", "descripcion": "", "cantidad": 0, "costo_unitario": "0.00"}}]
-                        }}
-                        Texto:
-                        {texto_chunk}"""
+                        texto_chunk = "\n---\n".join(chunk)
+                        prompt_prod_inv = f"""Extrae CADA FILA como un elemento separado. NO consolides líneas.
+                        Schema: {{"productos": [{{"codigo": "", "descripcion": "", "cantidad": 0, "costo_unitario": "0.00"}}]}}
+                        Texto: {texto_chunk}"""
                         res_chunk = preguntar_ia(prompt_prod_inv)
                         productos_factura.extend(res_chunk.get("productos", []))
                         progreso_inv.progress((idx + 1) / len(chunks_inv))
@@ -304,7 +277,7 @@ with tab2:
                     paginas_pl = []
                     with pdfplumber.open(pdf_pl) as pdf:
                         for page in pdf.pages:
-                            text = page.extract_text(layout=False)
+                            text = optimizar_tokens(page.extract_text(layout=False))
                             if text: paginas_pl.append(text + "\n")
 
                     productos_packing = []
@@ -314,15 +287,10 @@ with tab2:
 
                     for idx, chunk in enumerate(chunks_pl):
                         status_pl.text(f"⏳ Extrayendo empaques Packing List: Bloque {idx+1}/{len(chunks_pl)}...")
-                        texto_chunk = "\n--- NUEVA PÁGINA ---\n".join(chunk)
-                        prompt_prod_pl = f"""Analiza este segmento de PACKING LIST y extrae TODOS los datos logísticos en JSON.
-                        El 'codigo' debe ser exactamente el modelo o part number de fábrica.
-                        Schema JSON esperado:
-                        {{
-                          "productos": [{{"codigo": "", "peso_bruto_kg": "0.00", "peso_neto_kg": "0.00", "volumen_cbm": "0.00"}}]
-                        }}
-                        Texto:
-                        {texto_chunk}"""
+                        texto_chunk = "\n---\n".join(chunk)
+                        prompt_prod_pl = f"""Extrae datos logísticos en JSON.
+                        Schema: {{"productos": [{{"codigo": "", "peso_bruto_kg": "0.00", "peso_neto_kg": "0.00", "volumen_cbm": "0.00"}}]}}
+                        Texto: {texto_chunk}"""
                         res_chunk = preguntar_ia(prompt_prod_pl)
                         productos_packing.extend(res_chunk.get("productos", []))
                         progreso_pl.progress((idx + 1) / len(chunks_pl))
@@ -336,16 +304,13 @@ with tab2:
                     if df_factura.empty or df_packing.empty:
                         st.error("No se pudieron consolidar las listas. Verifica la estructura de tus archivos PDF.")
                     else:
-                        # 1. Limpieza rigurosa de códigos en ambas listas
                         df_factura['codigo'] = df_factura['codigo'].astype(str).str.strip().str.upper().str.replace(r'\s+', '', regex=True)
                         df_packing['codigo'] = df_packing['codigo'].astype(str).str.strip().str.upper().str.replace(r'\s+', '', regex=True)
 
                         df_factura['cantidad'] = pd.to_numeric(df_factura['cantidad'], errors='coerce').fillna(0)
                         
-                        # PARSEO SEGURO AQUÍ
                         df_factura['costo_unitario'] = df_factura['costo_unitario'].apply(parse_monto_seguro)
 
-                        # 2. Aplicación del factor de flete/ajustes
                         ajustes = json_factura.get("ajuste", {})
                         flete = parse_monto_seguro(ajustes.get("flete", "0.0"))
                         descuento = parse_monto_seguro(ajustes.get("descuento", "0.0"))
@@ -361,7 +326,6 @@ with tab2:
                         df_factura['costo_final'] = (df_factura['costo_unitario'] * factor).round(3)
                         df_factura['subtotal'] = (df_factura['cantidad'] * df_factura['costo_final']).round(3)
 
-                        # 3. Procesar Packing List agrupado por código único
                         for col in ['peso_bruto_kg', 'peso_neto_kg', 'volumen_cbm']:
                             if col in df_packing.columns:
                                 df_packing[col] = df_packing[col].apply(parse_monto_seguro)
@@ -374,10 +338,8 @@ with tab2:
                             'volumen_cbm': 'sum'
                         })
 
-                        # 4. Cruzar la FACTURA ÍNTEGRA (sin agrupar) con los totales de packing
                         df_consolidado = pd.merge(df_factura, df_packing_grouped, on='codigo', how='left')
                         
-                        # 5. PRORRATEO ESTRICTO POR LÍNEA INDEPENDIENTE
                         df_consolidado['total_cantidad_codigo'] = df_consolidado.groupby('codigo')['cantidad'].transform('sum')
                         
                         for col in ['peso_bruto_kg', 'peso_neto_kg', 'volumen_cbm']:
@@ -387,10 +349,8 @@ with tab2:
                                 axis=1
                             ).round(4)
 
-                        # Limpiamos la columna auxiliar de cálculo
                         df_consolidado = df_consolidado.drop(columns=['total_cantidad_codigo'])
 
-                        # 6. Estructura final para visualización
                         df_final_display = df_consolidado[[
                             "codigo", "descripcion", "cantidad", "costo_unitario", "costo_final", "subtotal", 
                             "peso_bruto_kg", "peso_neto_kg", "volumen_cbm"
@@ -437,10 +397,7 @@ with tab2:
                             ws.write(0, 0, "CONSOLIDADO DE COSTOS, PESOS Y MEDIDAS (LINEAL)", wb.add_format({'bold': True, 'font_size': 14}))
                             ws.write(1, 0, f"Invoice Nro: {num_doc_union}", fmt_normal)
 
-                            ws.set_column('A:A', 25)
-                            ws.set_column('B:B', 45)
-                            ws.set_column('C:F', 15) 
-                            ws.set_column('G:I', 18) 
+                            ws.set_column('A:A', 25); ws.set_column('B:B', 45); ws.set_column('C:F', 15); ws.set_column('G:I', 18) 
                             
                             for col_num, value in enumerate(df_final_display.columns.values):
                                 ws.write(4, col_num, value, fmt_azul_header)
@@ -493,21 +450,16 @@ with tab3:
                     paginas_inv_m = []
                     with pdfplumber.open(pdf_inv_m) as pdf:
                         for page in pdf.pages:
-                            text = page.extract_text(layout=False)
+                            text = optimizar_tokens(page.extract_text(layout=False))
                             if text: paginas_inv_m.append(text + "\n")
                     
-                    texto_completo_inv_m = "\n".join(paginas_inv_m)
+                    # OPTIMIZACIÓN GLOBALES
+                    texto_global_inv_m = paginas_inv_m[0]
+                    if len(paginas_inv_m) > 1: texto_global_inv_m += "\n---\n" + paginas_inv_m[-1]
 
-                    prompt_global_inv_m = f"""Analiza este texto de una FACTURA y extrae EXCLUSIVAMENTE los datos globales de encabezado (proveedor con su RIF), ajustes y totales en formato JSON. No traigas productos aquí.
-                    Schema JSON esperado:
-                    {{
-                      "proveedor": {{"nombre": "", "rif": ""}},
-                      "numero_documento": "NRO_FACTURA",
-                      "ajuste": {{"flete": "0.00", "descuento": "0.00", "recargo": "0.00"}},
-                      "totales": {{"total_neto_final": "0.00"}}
-                    }}
-                    Texto:
-                    {texto_completo_inv_m}"""
+                    prompt_global_inv_m = f"""Extrae EXCLUSIVAMENTE datos globales de encabezado.
+                    Schema: {{"proveedor": {{"nombre": "", "rif": ""}}, "numero_documento": "", "ajuste": {{"flete": "0.00", "descuento": "0.00", "recargo": "0.00"}}, "totales": {{"total_neto_final": "0.00"}}}}
+                    Texto: {texto_global_inv_m}"""
                     json_factura_m = preguntar_ia(prompt_global_inv_m)
 
                     productos_factura_m = []
@@ -517,18 +469,10 @@ with tab3:
 
                     for idx, chunk in enumerate(chunks_inv_m):
                         status_inv_m.text(f"⏳ Extrayendo ítems Invoice: Bloque {idx+1}/{len(chunks_inv_m)}...")
-                        texto_chunk = "\n--- NUEVA PÁGINA ---\n".join(chunk)
-                        prompt_prod_inv_m = f"""Analiza este segmento de FACTURA y extrae TODOS los productos en JSON.
-                        
-                        ⚠️ INSTRUCCIÓN CRÍTICA DE INTEGRIDAD: Extrae CADA FILA O LÍNEA de la tabla exactamente como aparece de forma literal. SI UN MISMO CÓDIGO DE PRODUCTO SE REPETITE EN LÍNEAS DIFERENTES O EN PÁGINAS DISTINTAS (incluso con costos diferentes o el mismo costo), DEBES CREAR UN ELEMENTO SEPARADO EN EL ARRAY PARA CADA FILA. Está estrictamente PROHIBIDO agrupar, consolidar, sumar cantidades o eliminar duplicados de líneas.
-                        
-                        El 'codigo' debe ser el part number o modelo literal.
-                        Schema JSON esperado:
-                        {{
-                          "productos": [{{"codigo": "", "descripcion": "", "cantidad": 0, "costo_unitario": "0.00"}}]
-                        }}
-                        Texto:
-                        {texto_chunk}"""
+                        texto_chunk = "\n---\n".join(chunk)
+                        prompt_prod_inv_m = f"""Extrae CADA FILA como un elemento separado. NO consolides.
+                        Schema: {{"productos": [{{"codigo": "", "descripcion": "", "cantidad": 0, "costo_unitario": "0.00"}}]}}
+                        Texto: {texto_chunk}"""
                         res_chunk = preguntar_ia(prompt_prod_inv_m)
                         productos_factura_m.extend(res_chunk.get("productos", []))
                         progreso_inv_m.progress((idx + 1) / len(chunks_inv_m))
@@ -539,7 +483,7 @@ with tab3:
                     paginas_pl_m = []
                     with pdfplumber.open(pdf_pl_m) as pdf:
                         for page in pdf.pages:
-                            text = page.extract_text(layout=False)
+                            text = optimizar_tokens(page.extract_text(layout=False))
                             if text: paginas_pl_m.append(text + "\n")
 
                     productos_packing_m = []
@@ -549,15 +493,10 @@ with tab3:
 
                     for idx, chunk in enumerate(chunks_pl_m):
                         status_pl_m.text(f"⏳ Extrayendo empaques Packing List: Bloque {idx+1}/{len(chunks_pl_m)}...")
-                        texto_chunk = "\n--- NUEVA PÁGINA ---\n".join(chunk)
-                        prompt_prod_pl_m = f"""Analiza este segmento de PACKING LIST y extrae TODOS los datos logísticos en JSON.
-                        El 'codigo' debe ser exactamente el modelo o part number de fábrica.
-                        Schema JSON esperado:
-                        {{
-                          "productos": [{{"codigo": "", "peso_bruto_kg": "0.00", "peso_neto_kg": "0.00", "volumen_cbm": "0.00"}}]
-                        }}
-                        Texto:
-                        {texto_chunk}"""
+                        texto_chunk = "\n---\n".join(chunk)
+                        prompt_prod_pl_m = f"""Extrae datos logísticos.
+                        Schema: {{"productos": [{{"codigo": "", "peso_bruto_kg": "0.00", "peso_neto_kg": "0.00", "volumen_cbm": "0.00"}}]}}
+                        Texto: {texto_chunk}"""
                         res_chunk = preguntar_ia(prompt_prod_pl_m)
                         productos_packing_m.extend(res_chunk.get("productos", []))
                         progreso_pl_m.progress((idx + 1) / len(chunks_pl_m))
@@ -571,16 +510,13 @@ with tab3:
                     if df_factura_m.empty or df_packing_m.empty:
                         st.error("No se pudieron consolidar las fuentes de datos. Verifica tus PDFs.")
                     else:
-                        # 1. Limpieza estricta de códigos
                         df_factura_m['codigo'] = df_factura_m['codigo'].astype(str).str.strip().str.upper().str.replace(r'\s+', '', regex=True)
                         df_packing_m['codigo'] = df_packing_m['codigo'].astype(str).str.strip().str.upper().str.replace(r'\s+', '', regex=True)
 
                         df_factura_m['cantidad'] = pd.to_numeric(df_factura_m['cantidad'], errors='coerce').fillna(0)
                         
-                        # PARSEO SEGURO AQUÍ
                         df_factura_m['costo_unitario'] = df_factura_m['costo_unitario'].apply(parse_monto_seguro)
 
-                        # 2. Aplicación proporcional de costos (Flete/Recargos)
                         ajustes_m = json_factura_m.get("ajuste", {})
                         flete_m = parse_monto_seguro(ajustes_m.get("flete", "0.0"))
                         descuento_m = parse_monto_seguro(ajustes_m.get("descuento", "0.0"))
@@ -595,7 +531,6 @@ with tab3:
                         
                         df_factura_m['costo_final'] = (df_factura_m['costo_unitario'] * factor_m).round(3)
 
-                        # 3. Agrupación del Packing List (Parseo Seguro)
                         for col in ['peso_bruto_kg', 'peso_neto_kg', 'volumen_cbm']:
                             if col in df_packing_m.columns:
                                 df_packing_m[col] = df_packing_m[col].apply(parse_monto_seguro)
@@ -608,10 +543,8 @@ with tab3:
                             'volumen_cbm': 'sum'
                         })
 
-                        # 4. Cruce secuencial sobre la factura intacta (Línea por Línea)
                         df_consolidado_m = pd.merge(df_factura_m, df_packing_grouped_m, on='codigo', how='left')
                         
-                        # 5. Prorrateo logístico estricto individual por renglón
                         df_consolidado_m['total_cantidad_codigo'] = df_consolidado_m.groupby('codigo')['cantidad'].transform('sum')
                         
                         for col in ['peso_bruto_kg', 'peso_neto_kg', 'volumen_cbm']:
@@ -623,38 +556,26 @@ with tab3:
 
                         df_consolidado_m = df_consolidado_m.drop(columns=['total_cantidad_codigo'])
 
-                        # =========================================================================
-                        # RE-ESTRUCTURACIÓN EXACTA SEGÚN FORMATOS EXIGIDOS POR EL SISTEMA EXTERNO
-                        # =========================================================================
-                        
-                        # Formato 1: cargaMasivaCosto.xlsx -> Columnas: 'codigo', 'costo'
                         df_costo_final_out = df_consolidado_m[['codigo', 'costo_final']].copy()
                         df_costo_final_out.columns = ['codigo', 'costo']
 
-                        # Formato 2: cargaMasivaPackageList.xlsx -> Columnas: 'rif', 'razonSocial', 'codigo', 'descripcion', 'cantidad', 'cbms', 'kgs'
                         rif_proveedor = str(json_factura_m.get("proveedor", {}).get("rif", "S_R")).strip()
                         razon_social_proveedor = str(json_factura_m.get("proveedor", {}).get("nombre", "S_R")).strip()
                         
-                        # Nos traemos también 'descripcion' que ya existía en df_consolidado_m
                         df_pl_final_out = df_consolidado_m[['codigo', 'descripcion', 'cantidad', 'volumen_cbm', 'peso_bruto_kg']].copy()
                         
-                        # Insertamos ordenadamente las nuevas columnas al inicio
                         df_pl_final_out.insert(0, 'razonSocial', razon_social_proveedor)
                         df_pl_final_out.insert(0, 'rif', rif_proveedor)
-                        
-                        # Renombramos explícitamente para que coincida al 100% con tu plantilla nueva
                         df_pl_final_out.columns = ['rif', 'razonSocial', 'codigo', 'descripcion', 'cantidad', 'cbms', 'kgs']
 
                         st.success("¡Plantillas para carga masiva construidas con éxito!")
                         
-                        # Muestra previsualizaciones para control visual rápido
                         st.subheader("📋 Vista de Carga Masiva: Costos")
                         st.dataframe(df_costo_final_out, use_container_width=True)
                         
                         st.subheader("📋 Vista de Carga Masiva: Package List")
                         st.dataframe(df_pl_final_out, use_container_width=True)
 
-                        # Generar los archivos binarios puros (sin filas vacías ni estilos en la cabecera)
                         buffer_masivo_costo = io.BytesIO()
                         with pd.ExcelWriter(buffer_masivo_costo, engine='xlsxwriter') as writer_costo:
                             df_costo_final_out.to_excel(writer_costo, index=False, sheet_name='Sheet1')
