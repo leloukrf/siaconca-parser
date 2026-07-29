@@ -307,11 +307,12 @@ with tab2:
                     for idx, chunk in enumerate(chunks_inv_m):
                         status_inv_m.text(f"⏳ Extrayendo Factura: Página {idx+1}/{len(chunks_inv_m)}...")
                         
+                        # PROMPT MEJORADO: Reglas estrictas contra categorías y data basura
                         prompt_prod_inv_m = f"""Analiza esta página y extrae TODOS los productos.
-                        REGLAS OBLIGATORIAS:
-                        1. NO TE SALTES NADA: Debes incluir cada producto listado.
-                        2. CÓDIGO DIVIDIDO: Si un Part Number está partido en dos líneas, ÚNELO en un solo texto continuo.
-                        3. IGNORAR ENCABEZADOS DE CATEGORÍA.
+                        REGLAS ESTRICTAS (CÚMPLELAS TODAS):
+                        1. SOLO PRODUCTOS REALES: Un producto válido SIEMPRE tiene un precio unitario y una cantidad asociada en su fila. Ignora por completo los encabezados o categorías (ej. "CRIMPING TOOL", "DOOR ACCESS CONTROLLER") porque no tienen precio ni cantidad.
+                        2. CÓDIGO LIMPIO: El campo "codigo" debe ser ÚNICAMENTE el número de parte (ej. "DH-PFM914"). NUNCA incluyas en este campo las cantidades, precios, descripciones o el número de PO (ej. "DH-S256260330").
+                        3. CÓDIGO DIVIDIDO: Si un Part Number está partido en dos líneas, únelo.
                         Schema JSON:
                         {{ "productos": [{{"codigo": "PART NUMBER", "cantidad": 0, "costo_unitario": "0.00"}}] }}
                         Texto:
@@ -341,10 +342,11 @@ with tab2:
                     for idx, chunk in enumerate(chunks_pl_m):
                         status_pl_m.text(f"⏳ Extrayendo Packing List: Página {idx+1}/{len(chunks_pl_m)}...")
                         
+                        # PROMPT MEJORADO: Reglas estrictas contra categorías y data basura
                         prompt_prod_pl_m = f"""Analiza esta página del PACKING LIST.
-                        REGLAS OBLIGATORIAS:
-                        1. EXTRAE TODAS LAS FILAS: No omitas productos como DH-PFM.
-                        2. CÓDIGO DIVIDIDO: Si un Part Number está partido en dos líneas, únelo.
+                        REGLAS ESTRICTAS (CÚMPLELAS TODAS):
+                        1. SOLO PRODUCTOS REALES: Ignora los títulos o categorías (ej. "COMPUTER MONITOR"). Solo extrae filas que tengan valores en las columnas Quantity(PCS), Gr.wt(KGS) y Measurement(CBMS).
+                        2. CÓDIGO LIMPIO: El campo "codigo" debe ser SOLO el Part Number alfanumérico (ej. "DHI-LM27-B221S"). No incluyas ningún otro dato en este campo.
                         3. CANTIDAD: Extrae obligatoriamente la cantidad de piezas (Quantity / PCS) de cada fila.
                         4. MAPEADO EXACTO: El Peso Bruto (Gr.wt) asígnalo a 'kgs'. El Volumen (Measurement o CBMS) asígnalo a 'cbms'.
                         Schema JSON:
@@ -371,6 +373,9 @@ with tab2:
                         # --- Limpieza de Factura ---
                         df_factura_m['codigo'] = df_factura_m['codigo'].astype(str).str.strip().str.upper()
                         df_factura_m['codigo_clean'] = df_factura_m['codigo'].apply(normalizar_codigo_cruce)
+                        
+                        # Filtro de seguridad adicional por si la IA se equivoca: solo mantener filas con códigos lógicos y cantidad > 0
+                        df_factura_m = df_factura_m[df_factura_m['codigo'].str.len() > 3] 
                         df_factura_m['cantidad'] = pd.to_numeric(df_factura_m['cantidad'], errors='coerce').fillna(0)
                         df_factura_m = df_factura_m[df_factura_m['cantidad'] > 0].copy()
                         df_factura_m['costo_unitario'] = df_factura_m['costo_unitario'].apply(parse_monto_seguro)
@@ -389,8 +394,8 @@ with tab2:
                         
                         df_factura_m['costo_final'] = (df_factura_m['costo_unitario'] * factor_m).round(3)
 
-                        # Agrupación de Costos
-                        df_costo_final_out = df_factura_m.groupby('codigo_clean', as_index=False).agg({
+                        # PANDAS FIX: sort=False para mantener el orden del PDF original
+                        df_costo_final_out = df_factura_m.groupby('codigo_clean', as_index=False, sort=False).agg({
                             'codigo': 'first',
                             'costo_final': 'mean'
                         })[['codigo', 'costo_final']].rename(columns={'costo_final': 'costo'})
@@ -399,12 +404,14 @@ with tab2:
                         df_packing_m['codigo'] = df_packing_m['codigo'].astype(str).str.strip().str.upper()
                         df_packing_m['codigo_clean'] = df_packing_m['codigo'].apply(normalizar_codigo_cruce)
                         
+                        # Filtro de seguridad adicional
+                        df_packing_m = df_packing_m[df_packing_m['codigo'].str.len() > 3]
                         df_packing_m['cantidad'] = pd.to_numeric(df_packing_m.get('cantidad', 0), errors='coerce').fillna(0)
                         df_packing_m['kgs'] = df_packing_m.get('kgs', 0).apply(parse_monto_seguro)
                         df_packing_m['cbms'] = df_packing_m.get('cbms', 0).apply(parse_monto_seguro)
 
-                        # Agrupación estricta para evitar duplicidad
-                        df_packing_grouped_m = df_packing_m.groupby('codigo_clean', as_index=False).agg({
+                        # PANDAS FIX: sort=False para mantener el orden original del Packing List
+                        df_packing_grouped_m = df_packing_m.groupby('codigo_clean', as_index=False, sort=False).agg({
                             'codigo': 'first',
                             'cantidad': 'sum',
                             'kgs': 'sum',
