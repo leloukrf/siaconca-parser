@@ -69,7 +69,7 @@ tab1, tab2, tab3 = st.tabs([
 def preguntar_ia(prompt_texto):
     error_log = []
 
-    # INTENTO 1: GROQ
+    # INTENTO 1: GROQ (El principal, rápido y potente)
     if groq_api_key:
         try:
             client_groq = Groq(api_key=groq_api_key)
@@ -81,11 +81,11 @@ def preguntar_ia(prompt_texto):
             )
             return json.loads(res.choices[0].message.content)
         except Exception as e:
-            error_log.append(f"Groq: {e}")
+            error_log.append(f"Groq falló: {e}")
     else:
         error_log.append("Groq: Key no configurada.")
 
-    # INTENTO 2: OPENROUTER
+    # INTENTO 2: OPENROUTER (Plan B)
     if openrouter_api_key:
         try:
             headers_or = {
@@ -95,7 +95,8 @@ def preguntar_ia(prompt_texto):
                 "X-Title": "Siaconca ERP Extractor"
             }
             data_or = {
-                "model": "meta-llama/llama-3.3-70b-instruct:free",
+                # CAMBIO AQUÍ: Usamos el modelo 8B que está garantizado 100% gratis y disponible
+                "model": "meta-llama/llama-3.1-8b-instruct:free",
                 "messages": [
                     {"role": "system", "content": "Return ONLY JSON."},
                     {"role": "user", "content": prompt_texto}
@@ -104,14 +105,18 @@ def preguntar_ia(prompt_texto):
                 "response_format": {"type": "json_object"}
             }
             response_or = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers_or, json=data_or)
-            response_or.raise_for_status() 
+            
+            # Si hay error 400/404, imprimimos el mensaje real que devuelve OpenRouter para saber por qué
+            if not response_or.ok:
+                raise Exception(f"Error {response_or.status_code}: {response_or.text}")
+                
             return json.loads(response_or.json()["choices"][0]["message"]["content"])
         except Exception as e:
-            error_log.append(f"OpenRouter: {e}")
+            error_log.append(f"OpenRouter falló: {e}")
     else:
         error_log.append("OpenRouter: Key no configurada.")
 
-    # INTENTO 3: CEREBRAS
+    # INTENTO 3: CEREBRAS (Plan C)
     if cerebras_api_key:
         try:
             headers_cer = {
@@ -119,7 +124,8 @@ def preguntar_ia(prompt_texto):
                 "Content-Type": "application/json"
             }
             data_cer = {
-                "model": "llama3.1-70b", # Cerebras usa la V3.1 ultrarrápida
+                # CAMBIO AQUÍ: Identificador exacto validado por la API de Cerebras
+                "model": "llama3.1-8b",
                 "messages": [
                     {"role": "system", "content": "Return ONLY JSON."},
                     {"role": "user", "content": prompt_texto}
@@ -128,10 +134,13 @@ def preguntar_ia(prompt_texto):
                 "response_format": {"type": "json_object"}
             }
             response_cer = requests.post("https://api.cerebras.ai/v1/chat/completions", headers=headers_cer, json=data_cer)
-            response_cer.raise_for_status()
+            
+            if not response_cer.ok:
+                raise Exception(f"Error {response_cer.status_code}: {response_cer.text}")
+                
             return json.loads(response_cer.json()["choices"][0]["message"]["content"])
         except Exception as e:
-            error_log.append(f"Cerebras: {e}")
+            error_log.append(f"Cerebras falló: {e}")
     else:
         error_log.append("Cerebras: Key no configurada.")
 
@@ -139,7 +148,6 @@ def preguntar_ia(prompt_texto):
     st.error("❌ Falla masiva: Ningún motor de IA pudo responder.")
     st.code("\n".join(error_log))
     st.stop()
-
 
 # =========================================================================
 # PESTAÑA 1: EXTRACTOR SIMPLE
