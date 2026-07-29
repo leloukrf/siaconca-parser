@@ -290,14 +290,15 @@ with tab2:
                     with pdfplumber.open(pdf_inv_m) as pdf:
                         for page in pdf.pages:
                             text = optimizar_tokens(page.extract_text(layout=False))
+                            # BLINDAJE 1: Unir códigos partidos por guion y salto de línea ANTES de la IA
+                            text = re.sub(r'-\s*\n\s*', '-', text)
                             if text: paginas_inv_m.append(text + "\n")
                     
                     texto_global_inv_m = paginas_inv_m[0]
                     if len(paginas_inv_m) > 1: texto_global_inv_m += "\n---\n" + paginas_inv_m[-1]
 
-                    # PROMPT BLINDADO CONTRA ALUCINACIONES DE FLETE
                     json_factura_m = preguntar_ia(f"""Extrae datos globales en JSON.
-                    REGLA VITAL: Si no ves las palabras exactas 'Flete', 'Freight', 'Descuento' o 'Discount', DEBES dejar esos valores en "0.00". NO adivines ni uses el total para esto.
+                    REGLA VITAL: NO adivines fletes ni descuentos. Si no dice explícitamente "Freight" o "Flete", el valor ES 0.00. NUNCA pongas el Grand Total en el flete.
                     {{ "proveedor": {{"nombre": "", "rif": ""}}, "numero_documento": "NRO", "ajuste": {{"flete": "0.00", "descuento": "0.00", "recargo": "0.00"}}, "totales": {{"total_neto_final": "0.00"}} }}
                     Texto: {texto_global_inv_m}""")
 
@@ -309,13 +310,11 @@ with tab2:
                     for idx, chunk in enumerate(chunks_inv_m):
                         status_inv_m.text(f"⏳ Extrayendo Factura: Página {idx+1}/{len(chunks_inv_m)}...")
                         
-                        # PROMPT BLINDADO PARA NO SALTARSE LÍNEAS
                         prompt_prod_inv_m = f"""Analiza esta página y extrae TODOS los productos.
-                        REGLAS ESTRICTAS (CÚMPLELAS TODAS):
-                        1. NO OMITAS NADA: Si una fila tiene una CANTIDAD y un PRECIO, ES UN PRODUCTO. Extraelo sin importar si el código es muy corto (ej. S5PRO, M1pro) o tiene paréntesis (ej. DHI-ARD324-W2(S)).
-                        2. IGNORA CATEGORÍAS PUERAS: Títulos como "DOOR ACCESS CONTROLLER" no tienen precio ni cantidad en su misma línea. Esos sí debes ignorarlos.
-                        3. CÓDIGO LIMPIO: El "codigo" debe ser SOLO el Part Number. No metas cantidades, descripciones ni números de PO aquí.
-                        4. CÓDIGO DIVIDIDO: Si el código está partido en dos líneas, únelo.
+                        REGLAS ESTRICTAS:
+                        1. NO OMITAS NADA: Si una fila tiene CANTIDAD y PRECIO UNITARIO, es un producto válido.
+                        2. IGNORA CATEGORÍAS PUERAS (ej. "DOOR ACCESS CONTROLLER") que no tengan precio ni cantidad.
+                        3. CÓDIGO LIMPIO: El "codigo" debe ser SOLO el Part Number (ej. DH-IPC-HDW5541TM-ASE, M1PRO, S5PRO). No metas el número de PO aquí.
                         Schema JSON:
                         {{ "productos": [{{"codigo": "PART NUMBER", "cantidad": 0, "costo_unitario": "0.00"}}] }}
                         Texto:
@@ -335,6 +334,8 @@ with tab2:
                     with pdfplumber.open(pdf_pl_m) as pdf:
                         for page in pdf.pages:
                             text = optimizar_tokens(page.extract_text(layout=False))
+                            # BLINDAJE 1 (Otra vez): Unir códigos cortados
+                            text = re.sub(r'-\s*\n\s*', '-', text)
                             if text: paginas_pl_m.append(text + "\n")
 
                     productos_packing_m = []
@@ -345,13 +346,11 @@ with tab2:
                     for idx, chunk in enumerate(chunks_pl_m):
                         status_pl_m.text(f"⏳ Extrayendo Packing List: Página {idx+1}/{len(chunks_pl_m)}...")
                         
-                        # PROMPT BLINDADO PARA PACKING LIST
                         prompt_prod_pl_m = f"""Analiza esta página del PACKING LIST.
-                        REGLAS ESTRICTAS (CÚMPLELAS TODAS):
-                        1. NO OMITAS NADA: Extrae toda fila que tenga Quantity(PCS), Gr.wt(KGS) y Measurement(CBMS). No te saltes productos con códigos cortos como S5PRO o M3PRO.
-                        2. IGNORA CATEGORÍAS: Ignora los títulos sueltos que no tienen cantidad ni kilos.
-                        3. CÓDIGO LIMPIO: Solo el Part Number alfanumérico.
-                        4. CANTIDAD: Extrae obligatoriamente la cantidad de piezas (Quantity / PCS) de cada fila.
+                        REGLAS ESTRICTAS:
+                        1. EXTRAE TODO: Fila con Quantity(PCS), Gr.wt(KGS) y Measurement(CBMS) es un producto válido.
+                        2. IGNORA CATEGORÍAS: Títulos sueltos sin números se ignoran.
+                        3. CANTIDAD: Extrae obligatoriamente la cantidad de piezas (Quantity / PCS).
                         Schema JSON:
                         {{ "productos": [{{"codigo": "PART NUMBER", "cantidad": 0, "kgs": "0.00", "cbms": "0.00"}}] }}
                         Texto:
@@ -377,7 +376,6 @@ with tab2:
                         df_factura_m['codigo'] = df_factura_m['codigo'].astype(str).str.strip().str.upper()
                         df_factura_m['codigo_clean'] = df_factura_m['codigo'].apply(normalizar_codigo_cruce)
                         
-                        # Suavizamos el filtro de seguridad para permitir códigos cortos como M1PRO
                         df_factura_m = df_factura_m[df_factura_m['codigo'].str.len() > 2] 
                         df_factura_m['cantidad'] = pd.to_numeric(df_factura_m['cantidad'], errors='coerce').fillna(0)
                         df_factura_m = df_factura_m[df_factura_m['cantidad'] > 0].copy()
@@ -387,10 +385,12 @@ with tab2:
                         flete_m = parse_monto_seguro(ajustes_m.get("flete", "0.0"))
                         descuento_m = parse_monto_seguro(ajustes_m.get("descuento", "0.0"))
                         recargo_m = parse_monto_seguro(ajustes_m.get("recargo", "0.0"))
+                        total_neto_real_m = parse_monto_seguro(json_factura_m.get("totales", {}).get("total_neto_final", "0.0"))
 
-                        # Aplicar prorrateo SOLO si hay un flete o descuento válidos
-                        if flete_m > 0 or descuento_m > 0 or recargo_m > 0:
-                            total_neto_real_m = parse_monto_seguro(json_factura_m.get("totales", {}).get("total_neto_final", "0.0"))
+                        # BLINDAJE 2: Seguro matemático contra alucinaciones de IA. 
+                        # Solo aplicar prorrateo si el flete/descuento reportado tiene sentido (ej. menor al 50% del total de la factura).
+                        suma_ajustes = flete_m + descuento_m + recargo_m
+                        if suma_ajustes > 0 and suma_ajustes < (total_neto_real_m * 0.5):
                             suma_bruta_m = (df_factura_m['cantidad'] * df_factura_m['costo_unitario']).sum()
                             factor_m = total_neto_real_m / suma_bruta_m if suma_bruta_m > 0 else 1.0
                         else:
@@ -398,7 +398,6 @@ with tab2:
                         
                         df_factura_m['costo_final'] = (df_factura_m['costo_unitario'] * factor_m).round(3)
 
-                        # PANDAS FIX: sort=False para mantener el orden del PDF original
                         df_costo_final_out = df_factura_m.groupby('codigo_clean', as_index=False, sort=False).agg({
                             'codigo': 'first',
                             'costo_final': 'mean'
