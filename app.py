@@ -85,6 +85,15 @@ def preguntar_ia(prompt_texto):
     if groq_api_key:
         client_groq = Groq(api_key=groq_api_key)
         modelos_groq = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.6-27b"]
+        # gpt-oss acepta 'low'/'medium'/'high'; qwen3.6 acepta 'none'/'default'.
+        # Usamos el mínimo esfuerzo de razonamiento posible en cada caso: esta
+        # tarea es extracción de datos, no necesita razonamiento profundo, y así
+        # dejamos más presupuesto de tokens para el JSON de salida.
+        reasoning_por_modelo = {
+            "openai/gpt-oss-120b": "low",
+            "openai/gpt-oss-20b": "low",
+            "qwen/qwen3.6-27b": "none",
+        }
 
         for modelo in modelos_groq:
             # Hasta 3 intentos por modelo: si es rate limit, esperamos y reintentamos
@@ -100,7 +109,13 @@ def preguntar_ia(prompt_texto):
                             {"role": "user", "content": prompt_texto}
                         ],
                         temperature=0.0,
-                        max_tokens=4000,
+                        # openai/gpt-oss-* y qwen3.6 son modelos "razonadores": consumen tokens
+                        # pensando antes de escribir la respuesta. Con max_tokens bajo, el
+                        # razonamiento se comía todo el presupuesto y el JSON salía cortado
+                        # (json_validate_failed). Subimos el límite y bajamos el esfuerzo de
+                        # razonamiento al mínimo, ya que esta tarea es extracción, no lógica compleja.
+                        max_tokens=8000,
+                        reasoning_effort=reasoning_por_modelo.get(modelo, "low"),
                         response_format={"type": "json_object"}
                     )
                     return json.loads(res.choices[0].message.content)
@@ -130,7 +145,7 @@ def preguntar_ia(prompt_texto):
             time.sleep(2)
             client_genai = genai.Client(api_key=gemini_api_key)
             res = client_genai.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-3.5-flash',
                 contents="Return ONLY JSON. Extract absolutely all items.\n\n" + prompt_texto,
                 config={"response_mime_type": "application/json", "temperature": 0.0}
             )
@@ -148,7 +163,8 @@ def preguntar_ia(prompt_texto):
         try:
             headers_or = {"Authorization": f"Bearer {openrouter_api_key}", "Content-Type": "application/json"}
             data_or = {
-                "model": "meta-llama/llama-3.1-8b-instruct:free",
+                "model": "openrouter/free",  # router oficial de OpenRouter que reparte
+                # la petición entre los modelos gratis disponibles en cada momento
                 "messages": [{"role": "system", "content": "Return ONLY JSON."}, {"role": "user", "content": prompt_texto}],
                 "temperature": 0.0,
                 "max_tokens": 4000
@@ -214,7 +230,7 @@ with tab1:
                     datos = preguntar_ia(prompt_global)
 
                     productos_totales = []
-                    TAMANO_LOTE = 4  # páginas por llamada a la IA (antes: 1). Baja este número
+                    TAMANO_LOTE = 3  # páginas por llamada a la IA (antes: 1). Baja este número
                     # si tus facturas tienen tablas muy densas y notas que la IA trunca resultados.
                     chunks = [paginas_texto[i:i+TAMANO_LOTE] for i in range(0, len(paginas_texto), TAMANO_LOTE)]
                     progreso_simple = st.progress(0)
@@ -337,7 +353,7 @@ with tab2:
                     Texto: {texto_global_inv_m}""")
 
                     productos_factura_m = []
-                    TAMANO_LOTE = 4  # páginas por llamada a la IA (antes: 1)
+                    TAMANO_LOTE = 3  # páginas por llamada a la IA (antes: 1)
                     chunks_inv_m = [paginas_inv_m[i:i+TAMANO_LOTE] for i in range(0, len(paginas_inv_m), TAMANO_LOTE)]
                     progreso_inv_m = st.progress(0)
                     status_inv_m = st.empty()
@@ -377,7 +393,7 @@ with tab2:
                             if text: paginas_pl_m.append(text + "\n")
 
                     productos_packing_m = []
-                    TAMANO_LOTE = 4  # páginas por llamada a la IA (antes: 1)
+                    TAMANO_LOTE = 3  # páginas por llamada a la IA (antes: 1)
                     chunks_pl_m = [paginas_pl_m[i:i+TAMANO_LOTE] for i in range(0, len(paginas_pl_m), TAMANO_LOTE)]
                     progreso_pl_m = st.progress(0)
                     status_pl_m = st.empty()
