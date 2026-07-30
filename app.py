@@ -42,7 +42,15 @@ else:
 # --- FUNCIONES DE OPTIMIZACIÓN Y PARSEO ---
 def optimizar_tokens(texto):
     if not texto: return ""
-    return re.sub(r'[ \t]+', ' ', texto).strip()
+    # OJO: antes esto colapsaba espacios múltiples a uno solo con r'[ \t]+' -> ' ',
+    # lo cual destruye la alineación de columnas que produce layout=True (esa
+    # alineación se representa justamente con varios espacios seguidos). Ahora
+    # solo quitamos espacios/tabs SOBRANTES al final de cada línea y limitamos
+    # líneas en blanco repetidas, sin tocar los espacios internos de cada línea.
+    lineas = [linea.rstrip() for linea in texto.split("\n")]
+    texto_limpio = "\n".join(lineas)
+    texto_limpio = re.sub(r'\n{3,}', '\n\n', texto_limpio)
+    return texto_limpio.strip()
 
 def parse_monto_seguro(valor):
     if pd.isna(valor) or valor == '' or valor is None: return 0.0
@@ -70,43 +78,61 @@ def preguntar_ia(prompt_texto):
     error_log = []
 
     # INTENTO 1: GROQ
+    # NOTA (jul-2026): llama-3.3-70b-versatile y llama-3.1-8b-instant fueron
+    # descontinuados por Groq (apagado definitivo 16-ago-2026). mixtral-8x7b-32768
+    # ya no existe desde 2025. Se reemplazan por los modelos vigentes recomendados
+    # por Groq. Revisa console.groq.com/docs/models si esto vuelve a fallar.
     if groq_api_key:
         client_groq = Groq(api_key=groq_api_key)
-        modelos_groq = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
-        
+        modelos_groq = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.6-27b"]
+
         for modelo in modelos_groq:
-            try:
-                res = client_groq.chat.completions.create(
-                    model=modelo,
-                    messages=[
-                        {"role": "system", "content": "Return ONLY JSON. Extract absolutely all items, do not truncate."}, 
-                        {"role": "user", "content": prompt_texto}
-                    ],
-                    temperature=0.0, 
-                    max_tokens=4000,
-                    response_format={"type": "json_object"}
-                )
-                return json.loads(res.choices[0].message.content)
-            except Exception as e:
-                err_str = str(e).lower()
-                if 'rate limit' in err_str or '429' in err_str or 'tokens' in err_str:
-                    error_log.append(f"Groq ({modelo}) sin tokens. Saltando...")
-                    continue
-                else:
-                    error_log.append(f"Groq ({modelo}) falló: {e}")
-                    break 
+            # Hasta 3 intentos por modelo: si es rate limit, esperamos y reintentamos
+            # ese MISMO modelo antes de darlo por perdido. Antes el código pasaba
+            # directo al siguiente motor (Gemini) ante cualquier 429, agotando la
+            # cascada de Groq sin necesidad.
+            for intento in range(3):
+                try:
+                    res = client_groq.chat.completions.create(
+                        model=modelo,
+                        messages=[
+                            {"role": "system", "content": "Return ONLY JSON. Extract absolutely all items, do not truncate."},
+                            {"role": "user", "content": prompt_texto}
+                        ],
+                        temperature=0.0,
+                        max_tokens=4000,
+                        response_format={"type": "json_object"}
+                    )
+                    return json.loads(res.choices[0].message.content)
+                except Exception as e:
+                    err_str = str(e).lower()
+                    if 'rate limit' in err_str or '429' in err_str:
+                        espera = 8 * (intento + 1)
+                        error_log.append(f"Groq ({modelo}) rate limit, esperando {espera}s (intento {intento+1}/3)...")
+                        time.sleep(espera)
+                        continue
+                    else:
+                        # Error real (modelo inválido, servidor caído, etc.):
+                        # no tiene sentido reintentar este modelo, pasamos al siguiente.
+                        error_log.append(f"Groq ({modelo}) falló: {e}")
+                        break
+            else:
+                # Se agotaron los 3 intentos por rate limit en este modelo: probamos el siguiente
+                continue
     else:
         error_log.append("Groq: Key no configurada.")
 
     # INTENTO 2: GEMINI
+    # NOTA (jul-2026): gemini-1.5-flash ya fue apagado por Google (404 siempre).
+    # Se reemplaza por gemini-2.5-flash (GA, estable).
     if gemini_api_key:
         try:
-            time.sleep(4.2)
+            time.sleep(2)
             client_genai = genai.Client(api_key=gemini_api_key)
             res = client_genai.models.generate_content(
-                model='gemini-1.5-flash', 
+                model='gemini-2.5-flash',
                 contents="Return ONLY JSON. Extract absolutely all items.\n\n" + prompt_texto,
-                config={"response_mime_type": "application/json", "temperature": 0.0} 
+                config={"response_mime_type": "application/json", "temperature": 0.0}
             )
             return json.loads(res.text)
         except Exception as e:
@@ -115,17 +141,20 @@ def preguntar_ia(prompt_texto):
         error_log.append("Gemini: Key no configurada.")
 
     # INTENTO 3: OPENROUTER
+    # NOTA: "openrouter/free" no es un model id válido de OpenRouter. Usa un id
+    # real de un modelo gratuito (verifica cuál está disponible ahora mismo en
+    # openrouter.ai/models?max_price=0 porque cambian con frecuencia).
     if openrouter_api_key:
         try:
             headers_or = {"Authorization": f"Bearer {openrouter_api_key}", "Content-Type": "application/json"}
             data_or = {
-                "model": "openrouter/free", 
+                "model": "meta-llama/llama-3.1-8b-instruct:free",
                 "messages": [{"role": "system", "content": "Return ONLY JSON."}, {"role": "user", "content": prompt_texto}],
                 "temperature": 0.0,
                 "max_tokens": 4000
             }
-            response_or = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers_or, json=data_or)
-            
+            response_or = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers_or, json=data_or, timeout=60)
+
             if response_or.ok:
                 content_or = response_or.json()["choices"][0]["message"]["content"]
                 content_or = re.sub(r'^```json\n|\n```$', '', content_or.strip())
@@ -162,7 +191,10 @@ with tab1:
                     paginas_texto = []
                     with pdfplumber.open(archivo_pdf) as pdf:
                         for page in pdf.pages:
-                            text = optimizar_tokens(page.extract_text(layout=False))
+                            # layout=True preserva la alineación de columnas del PDF (en vez de
+                            # aplanar todo a texto corrido), lo que ayuda mucho a la IA a no
+                            # confundir columnas numéricas entre sí.
+                            text = optimizar_tokens(page.extract_text(layout=True))
                             if text: paginas_texto.append(text + "\n")
 
                     texto_global = paginas_texto[0]
@@ -182,7 +214,9 @@ with tab1:
                     datos = preguntar_ia(prompt_global)
 
                     productos_totales = []
-                    chunks = [paginas_texto[i:i+1] for i in range(0, len(paginas_texto), 1)]
+                    TAMANO_LOTE = 4  # páginas por llamada a la IA (antes: 1). Baja este número
+                    # si tus facturas tienen tablas muy densas y notas que la IA trunca resultados.
+                    chunks = [paginas_texto[i:i+TAMANO_LOTE] for i in range(0, len(paginas_texto), TAMANO_LOTE)]
                     progreso_simple = st.progress(0)
                     status_simple = st.empty()
 
@@ -288,7 +322,9 @@ with tab2:
                     paginas_inv_m = []
                     with pdfplumber.open(pdf_inv_m) as pdf:
                         for page in pdf.pages:
-                            text = optimizar_tokens(page.extract_text(layout=False))
+                            # layout=True preserva columnas -> menos confusión entre
+                            # cantidad / costo_unitario / amount para la IA.
+                            text = optimizar_tokens(page.extract_text(layout=True))
                             text = re.sub(r'-\s*\n\s*', '-', text)
                             if text: paginas_inv_m.append(text + "\n")
                     
@@ -301,7 +337,8 @@ with tab2:
                     Texto: {texto_global_inv_m}""")
 
                     productos_factura_m = []
-                    chunks_inv_m = [paginas_inv_m[i:i+1] for i in range(0, len(paginas_inv_m), 1)]
+                    TAMANO_LOTE = 4  # páginas por llamada a la IA (antes: 1)
+                    chunks_inv_m = [paginas_inv_m[i:i+TAMANO_LOTE] for i in range(0, len(paginas_inv_m), TAMANO_LOTE)]
                     progreso_inv_m = st.progress(0)
                     status_inv_m = st.empty()
 
@@ -333,12 +370,15 @@ with tab2:
                     paginas_pl_m = []
                     with pdfplumber.open(pdf_pl_m) as pdf:
                         for page in pdf.pages:
-                            text = optimizar_tokens(page.extract_text(layout=False))
+                            # Aquí es donde más importa layout=True: la confusión
+                            # CTNS vs PCS vs Gr.wt viene de perder la alineación de columnas.
+                            text = optimizar_tokens(page.extract_text(layout=True))
                             text = re.sub(r'-\s*\n\s*', '-', text)
                             if text: paginas_pl_m.append(text + "\n")
 
                     productos_packing_m = []
-                    chunks_pl_m = [paginas_pl_m[i:i+1] for i in range(0, len(paginas_pl_m), 1)]
+                    TAMANO_LOTE = 4  # páginas por llamada a la IA (antes: 1)
+                    chunks_pl_m = [paginas_pl_m[i:i+TAMANO_LOTE] for i in range(0, len(paginas_pl_m), TAMANO_LOTE)]
                     progreso_pl_m = st.progress(0)
                     status_pl_m = st.empty()
 
