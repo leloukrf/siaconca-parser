@@ -290,7 +290,7 @@ with tab2:
                     with pdfplumber.open(pdf_inv_m) as pdf:
                         for page in pdf.pages:
                             text = optimizar_tokens(page.extract_text(layout=False))
-                            # BLINDAJE 1: Unir códigos partidos por guion y salto de línea ANTES de la IA
+                            # BLINDAJE 1: Unimos cualquier código roto por guiones (ej. DH-SDT6C425-4P-GB-APV-0280)
                             text = re.sub(r'-\s*\n\s*', '-', text)
                             if text: paginas_inv_m.append(text + "\n")
                     
@@ -298,7 +298,7 @@ with tab2:
                     if len(paginas_inv_m) > 1: texto_global_inv_m += "\n---\n" + paginas_inv_m[-1]
 
                     json_factura_m = preguntar_ia(f"""Extrae datos globales en JSON.
-                    REGLA VITAL: NO adivines fletes ni descuentos. Si no dice explícitamente "Freight" o "Flete", el valor ES 0.00. NUNCA pongas el Grand Total en el flete.
+                    REGLA VITAL: NO adivines fletes. Si no dice explícitamente la palabra "Freight" o "Flete" con un monto al lado, pon "0.00".
                     {{ "proveedor": {{"nombre": "", "rif": ""}}, "numero_documento": "NRO", "ajuste": {{"flete": "0.00", "descuento": "0.00", "recargo": "0.00"}}, "totales": {{"total_neto_final": "0.00"}} }}
                     Texto: {texto_global_inv_m}""")
 
@@ -310,11 +310,13 @@ with tab2:
                     for idx, chunk in enumerate(chunks_inv_m):
                         status_inv_m.text(f"⏳ Extrayendo Factura: Página {idx+1}/{len(chunks_inv_m)}...")
                         
+                        # BLINDAJE 2: Prompt ultra estricto para evitar POs y saltos
                         prompt_prod_inv_m = f"""Analiza esta página y extrae TODOS los productos.
-                        REGLAS ESTRICTAS:
-                        1. NO OMITAS NADA: Si una fila tiene CANTIDAD y PRECIO UNITARIO, es un producto válido.
-                        2. IGNORA CATEGORÍAS PUERAS (ej. "DOOR ACCESS CONTROLLER") que no tengan precio ni cantidad.
-                        3. CÓDIGO LIMPIO: El "codigo" debe ser SOLO el Part Number (ej. DH-IPC-HDW5541TM-ASE, M1PRO, S5PRO). No metas el número de PO aquí.
+                        REGLAS DE VIDA O MUERTE (Si fallas, el sistema colapsa):
+                        1. ¡PROHIBIDO USAR EL PO!: La última columna (ej. DH-S256260330 o DH-S256260330-1) es una Orden de Compra. NUNCA la pongas como 'codigo'. El código real SIEMPRE está a la izquierda.
+                        2. NO OMITAS PRODUCTOS: Si ves una CANTIDAD y un PRECIO UNITARIO, es un producto válido. Cópialo sin importar si el código es corto (S5PRO) o tiene paréntesis.
+                        3. CÓDIGOS ROTOS: Si el texto dice "DH-SDT6C425-4P-GB-APV-" y abajo dice "0280", debes extraerlo completo como "DH-SDT6C425-4P-GB-APV-0280".
+                        4. IGNORA TEXTOS SUELTOS: Ignora categorías (ej. "DOOR ACCESS CONTROLLER") que no tengan precio.
                         Schema JSON:
                         {{ "productos": [{{"codigo": "PART NUMBER", "cantidad": 0, "costo_unitario": "0.00"}}] }}
                         Texto:
@@ -334,7 +336,6 @@ with tab2:
                     with pdfplumber.open(pdf_pl_m) as pdf:
                         for page in pdf.pages:
                             text = optimizar_tokens(page.extract_text(layout=False))
-                            # BLINDAJE 1 (Otra vez): Unir códigos cortados
                             text = re.sub(r'-\s*\n\s*', '-', text)
                             if text: paginas_pl_m.append(text + "\n")
 
@@ -347,10 +348,10 @@ with tab2:
                         status_pl_m.text(f"⏳ Extrayendo Packing List: Página {idx+1}/{len(chunks_pl_m)}...")
                         
                         prompt_prod_pl_m = f"""Analiza esta página del PACKING LIST.
-                        REGLAS ESTRICTAS:
-                        1. EXTRAE TODO: Fila con Quantity(PCS), Gr.wt(KGS) y Measurement(CBMS) es un producto válido.
-                        2. IGNORA CATEGORÍAS: Títulos sueltos sin números se ignoran.
-                        3. CANTIDAD: Extrae obligatoriamente la cantidad de piezas (Quantity / PCS).
+                        REGLAS DE VIDA O MUERTE:
+                        1. EXTRAE TODAS LAS FILAS con Quantity(PCS), Gr.wt(KGS) y Measurement(CBMS).
+                        2. CÓDIGOS ROTOS: Si un código está partido, únelo (ej. DH-SDT6C...0280).
+                        3. CANTIDAD: Extrae obligatoriamente la cantidad de piezas.
                         Schema JSON:
                         {{ "productos": [{{"codigo": "PART NUMBER", "cantidad": 0, "kgs": "0.00", "cbms": "0.00"}}] }}
                         Texto:
@@ -374,8 +375,10 @@ with tab2:
                     else:
                         # --- Limpieza de Factura ---
                         df_factura_m['codigo'] = df_factura_m['codigo'].astype(str).str.strip().str.upper()
-                        df_factura_m['codigo_clean'] = df_factura_m['codigo'].apply(normalizar_codigo_cruce)
+                        # BLINDAJE 3: Eliminamos por la fuerza si la IA coló algún "DH-S" (Los PO numbers)
+                        df_factura_m = df_factura_m[~df_factura_m['codigo'].str.startswith('DH-S256')]
                         
+                        df_factura_m['codigo_clean'] = df_factura_m['codigo'].apply(normalizar_codigo_cruce)
                         df_factura_m = df_factura_m[df_factura_m['codigo'].str.len() > 2] 
                         df_factura_m['cantidad'] = pd.to_numeric(df_factura_m['cantidad'], errors='coerce').fillna(0)
                         df_factura_m = df_factura_m[df_factura_m['cantidad'] > 0].copy()
@@ -387,14 +390,14 @@ with tab2:
                         recargo_m = parse_monto_seguro(ajustes_m.get("recargo", "0.0"))
                         total_neto_real_m = parse_monto_seguro(json_factura_m.get("totales", {}).get("total_neto_final", "0.0"))
 
-                        # BLINDAJE 2: Seguro matemático contra alucinaciones de IA. 
-                        # Solo aplicar prorrateo si el flete/descuento reportado tiene sentido (ej. menor al 50% del total de la factura).
+                        # BLINDAJE 4: Seguro matemático absoluto contra alucinaciones.
+                        # El flete jamás debería superar el 20% de la factura. Si es un valor gigante, lo ignoramos.
                         suma_ajustes = flete_m + descuento_m + recargo_m
-                        if suma_ajustes > 0 and suma_ajustes < (total_neto_real_m * 0.5):
+                        if suma_ajustes > 0 and suma_ajustes < (total_neto_real_m * 0.20):
                             suma_bruta_m = (df_factura_m['cantidad'] * df_factura_m['costo_unitario']).sum()
                             factor_m = total_neto_real_m / suma_bruta_m if suma_bruta_m > 0 else 1.0
                         else:
-                            factor_m = 1.0
+                            factor_m = 1.0 # Se mantiene el costo original intacto
                         
                         df_factura_m['costo_final'] = (df_factura_m['costo_unitario'] * factor_m).round(3)
 
@@ -405,6 +408,9 @@ with tab2:
 
                         # --- Limpieza de Packing List ---
                         df_packing_m['codigo'] = df_packing_m['codigo'].astype(str).str.strip().str.upper()
+                        # Borrado de emergencia por si se coló un PO
+                        df_packing_m = df_packing_m[~df_packing_m['codigo'].str.startswith('DH-S256')]
+                        
                         df_packing_m['codigo_clean'] = df_packing_m['codigo'].apply(normalizar_codigo_cruce)
                         
                         df_packing_m = df_packing_m[df_packing_m['codigo'].str.len() > 2]
