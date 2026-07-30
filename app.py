@@ -73,6 +73,49 @@ def normalizar_codigo_cruce(codigo):
     c = c.replace('I', '1').replace('O', '0')
     return c
 
+def extraer_paginas_tabla(pdf_file):
+    """
+    En vez de aplanar el PDF a texto y esperar que la IA reconstruya sola qué
+    línea pertenece a qué columna, usamos el detector de tablas de pdfplumber
+    (que se basa en las líneas/bordes reales del PDF) para obtener cada fila ya
+    con sus celdas correctamente delimitadas. Esto incluye celdas que ocupan 2+
+    líneas dentro del PDF (ej. un código o un PO partido en dos renglones):
+    pdfplumber las junta como UNA sola celda porque conoce la cuadrícula real,
+    no porque esté adivinando desde texto plano. Esta es la raíz de bugs como
+    "ECO" pegándose al código, o "-PRO" convirtiéndose en un número: la IA
+    confundía a qué columna/fila pertenecía una línea suelta.
+    Cada fila se serializa como "celda1 | celda2 | celda3 | ..." para que la IA
+    reciba la estructura ya resuelta y solo tenga que interpretar el significado
+    de cada columna (que sigue variando entre proveedores).
+    """
+    paginas = []
+    with pdfplumber.open(pdf_file) as pdf:
+        for page in pdf.pages:
+            tablas = page.extract_tables()
+            texto_pagina = ""
+            if tablas:
+                for tabla in tablas:
+                    for fila in tabla:
+                        celdas_limpias = []
+                        for celda in fila:
+                            c = celda or ""
+                            # Une líneas partidas por guion dentro de la MISMA celda
+                            # (ej. "DH-S256260529-" + "ECO" -> "DH-S256260529-ECO")
+                            c = re.sub(r'-\s*\n\s*', '-', c)
+                            # Cualquier otro salto de línea dentro de la celda (wrap
+                            # normal de texto) se vuelve un espacio simple
+                            c = c.replace('\n', ' ').strip()
+                            celdas_limpias.append(c)
+                        if any(celdas_limpias):
+                            texto_pagina += " | ".join(celdas_limpias) + "\n"
+            else:
+                # Si esta página no tiene una tabla con bordes detectables,
+                # volvemos al texto plano con layout como respaldo.
+                texto_pagina = page.extract_text(layout=True) or ""
+            if texto_pagina.strip():
+                paginas.append(optimizar_tokens(texto_pagina) + "\n")
+    return paginas
+
 # --- RED DE REDUNDANCIA MULTI-MODELO ---
 def preguntar_ia(prompt_texto):
     error_log = []
@@ -209,14 +252,10 @@ with tab1:
         if st.button("🚀 Procesar Factura", type="primary", use_container_width=True):
             with st.spinner("Extrayendo página por página..."):
                 try:
-                    paginas_texto = []
-                    with pdfplumber.open(archivo_pdf) as pdf:
-                        for page in pdf.pages:
-                            # layout=True preserva la alineación de columnas del PDF (en vez de
-                            # aplanar todo a texto corrido), lo que ayuda mucho a la IA a no
-                            # confundir columnas numéricas entre sí.
-                            text = optimizar_tokens(page.extract_text(layout=True))
-                            if text: paginas_texto.append(text + "\n")
+                    # Detección de tabla por bordes reales del PDF (ver extraer_paginas_tabla)
+                    # en vez de texto plano: evita que la IA confunda columnas o una celda
+                    # partida en 2 líneas con la fila de al lado.
+                    paginas_texto = extraer_paginas_tabla(archivo_pdf)
 
                     texto_global = paginas_texto[0]
                     if len(paginas_texto) > 1:
@@ -246,9 +285,12 @@ with tab1:
                         texto_chunk = "\n--- NUEVA PÁGINA ---\n".join(chunk)
                         
                         prompt_productos = f"""Analiza este segmento de factura y extrae TODOS los productos.
+                        FORMATO DEL TEXTO: cada fila de la tabla ya viene separada así: "celda1 | celda2 | celda3 | ...",
+                        en el mismo orden de columnas que en el PDF original. Cada celda ya está completa (si en el PDF
+                        ocupaba 2 líneas, aquí ya viene unida en una sola celda) — no necesitas adivinar ni unir nada más.
                         REGLAS ESTRICTAS:
                         1. NO TE SALTES NADA: Extrae todas las filas de productos.
-                        2. CÓDIGO DIVIDIDO: Si un 'codigo' está dividido en dos líneas, únelo.
+                        2. Usa cada celda tal cual viene, respetando su columna. No mezcles el contenido de una celda con el de otra.
                         3. COSTO UNITARIO CORRECTO: El 'costo_unitario' es el PRIMER precio que aparece después de la cantidad. ¡NUNCA MULTIPLIQUES! ¡NUNCA uses el Amount total!
                         Schema JSON esperado:
                         {{
@@ -345,14 +387,7 @@ with tab2:
                     # ==========================================
                     # 1. EXTRACCIÓN DE LA FACTURA (INVOICE)
                     # ==========================================
-                    paginas_inv_m = []
-                    with pdfplumber.open(pdf_inv_m) as pdf:
-                        for page in pdf.pages:
-                            # layout=True preserva columnas -> menos confusión entre
-                            # cantidad / costo_unitario / amount para la IA.
-                            text = optimizar_tokens(page.extract_text(layout=True))
-                            text = re.sub(r'-\s*\n\s*', '-', text)
-                            if text: paginas_inv_m.append(text + "\n")
+                    paginas_inv_m = extraer_paginas_tabla(pdf_inv_m)
                     
                     texto_global_inv_m = paginas_inv_m[0]
                     if len(paginas_inv_m) > 1: texto_global_inv_m += "\n---\n" + paginas_inv_m[-1]
@@ -372,17 +407,16 @@ with tab2:
                         status_inv_m.text(f"⏳ Extrayendo Factura: Página {idx+1}/{len(chunks_inv_m)}...")
                         
                         prompt_prod_inv_m = f"""Analiza esta página de Factura (Invoice) y extrae TODOS los productos.
+                        FORMATO DEL TEXTO: cada fila ya viene separada así: "celda1 | celda2 | celda3 | ...", en el
+                        mismo orden de columnas del PDF. Cada celda ya está completa (si en el PDF ocupaba 2 líneas,
+                        aquí ya viene unida en una sola celda) — no necesitas adivinar ni unir nada, solo leer cada
+                        celda en su columna correspondiente.
                         REGLAS DE VIDA O MUERTE (Si fallas, el sistema colapsa):
-                        1. ¡PROHIBIDO USAR EL PO!: La última columna (ej. DH-S256260330) es la Orden de Compra (PO). NUNCA la pongas como código.
+                        1. ¡PROHIBIDO USAR EL PO!: La última columna (ej. DH-S256260330-ECO) es la Orden de Compra (PO). NUNCA la pongas como código, y nunca mezcles su contenido con el de la columna de código.
                         2. ¡COSTO UNITARIO CORRECTO!: El costo unitario es SIEMPRE el PRIMER monto que aparece inmediatamente después de la cantidad. 
                            NUNCA TÓMES EL ÚLTIMO NÚMERO (Ese es el Amount/Total). ¡NUNCA MULTIPLIQUES LA CANTIDAD POR EL PRECIO!
                            Ejemplo: "8 | 450.0000 | 3600.00" -> cantidad = 8, costo_unitario = 450.00
-                        3. CÓDIGOS ROTOS: Únelos siempre, PERO SOLO dentro de la MISMA columna de código.
-                           "DH-SDT6C425-4P-GB-APV-" y en la otra linea "0280" forman "DH-SDT6C425-4P-GB-APV-0280".
-                        4. ¡OJO! La columna del PO (la última) también se parte en dos líneas a veces
-                           (ej. "DH-S256260529-" y en la línea de abajo "ECO"). Esa palabra suelta de abajo
-                           PERTENECE AL PO, no al código del producto. NUNCA la pegues al campo "codigo".
-                           El campo "codigo" JAMÁS debe contener espacios ni la palabra "ECO" u otras palabras sueltas.
+                        3. El campo "codigo" JAMÁS debe contener espacios ni palabras sueltas de otras columnas.
                         Schema JSON:
                         {{ "productos": [{{"codigo": "PART NUMBER", "cantidad": 0, "costo_unitario": "0.00"}}] }}
                         Texto:
@@ -398,14 +432,11 @@ with tab2:
                     # ==========================================
                     # 2. EXTRACCIÓN DEL PACKING LIST
                     # ==========================================
-                    paginas_pl_m = []
-                    with pdfplumber.open(pdf_pl_m) as pdf:
-                        for page in pdf.pages:
-                            # Aquí es donde más importa layout=True: la confusión
-                            # CTNS vs PCS vs Gr.wt viene de perder la alineación de columnas.
-                            text = optimizar_tokens(page.extract_text(layout=True))
-                            text = re.sub(r'-\s*\n\s*', '-', text)
-                            if text: paginas_pl_m.append(text + "\n")
+                    # Aquí es donde más importaba este cambio: la confusión CTNS vs PCS
+                    # vs Gr.wt, y códigos partidos en 2 líneas (ej. "-PRO" volviéndose un
+                    # número), venían de que la IA tenía que adivinar la estructura de la
+                    # tabla a partir de texto plano. Ahora pdfplumber ya la resuelve.
+                    paginas_pl_m = extraer_paginas_tabla(pdf_pl_m)
 
                     productos_packing_m = []
                     TAMANO_LOTE = 2  # páginas por llamada a la IA (antes: 1)
@@ -417,13 +448,16 @@ with tab2:
                         status_pl_m.text(f"⏳ Extrayendo Packing List: Página {idx+1}/{len(chunks_pl_m)}...")
                         
                         prompt_prod_pl_m = f"""Analiza esta página del PACKING LIST.
+                        FORMATO DEL TEXTO: cada fila ya viene separada así: "codigo | CTNS | PCS | Gr.wt | Net Wt | CBMS"
+                        (mismo orden de columnas del PDF). Cada celda ya está completa y no se mezcla con la de al lado
+                        — no necesitas adivinar ni unir nada, ni siquiera si en el PDF original el código ocupaba 2 líneas.
                         REGLAS DE VIDA O MUERTE:
                         1. LÓGICA DE COLUMNAS CORRECTA: Las columnas de números son: [CTNS] [PCS] [Gr.wt] [Net Wt] [CBMS].
                            - 'cantidad': Tienes que extraer los PCS (Pieces). Es decir, el SEGUNDO número entero después del código. ¡NO TOMES LOS CTNS (Bultos)!
                            - 'kgs': Es el TERCER número (Gr.wt).
                            - 'cbms': Es el ÚLTIMO número de la fila.
                            Ejemplo: "25 | 500 | 230 | 205 | 1.925" -> cantidad=500, kgs=230, cbms=1.925
-                        2. CÓDIGOS ROTOS: Si un código está partido, únelo (ej. DH-SDT6C...0280).
+                        2. El campo "codigo" es exactamente la primera celda de la fila, tal cual viene. JAMÁS le agregues números de otras columnas ni le quites caracteres.
                         Schema JSON:
                         {{ "productos": [{{"codigo": "PART NUMBER", "cantidad": 0, "kgs": "0.00", "cbms": "0.00"}}] }}
                         Texto:
