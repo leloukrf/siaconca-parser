@@ -12,7 +12,7 @@ import requests
 
 st.set_page_config(page_title="Siaconca: Extractor Profesional", layout="wide")
 
-st.title("📄 Siaconca: Extractor v8.4 (Ultra Precisión y Paginación)")
+st.title("📄 Siaconca: Extractor v8.5 (Anti-Alucinaciones de Columnas)")
 
 # --- CARGA AUTOMÁTICA Y SEGURA DE API KEYS ---
 groq_api_key = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY", "")
@@ -182,7 +182,6 @@ with tab1:
                     datos = preguntar_ia(prompt_global)
 
                     productos_totales = []
-                    # CHUNKING REPARADO: 1 Página a la vez
                     chunks = [paginas_texto[i:i+1] for i in range(0, len(paginas_texto), 1)]
                     progreso_simple = st.progress(0)
                     status_simple = st.empty()
@@ -193,9 +192,9 @@ with tab1:
                         
                         prompt_productos = f"""Analiza este segmento de factura y extrae TODOS los productos.
                         REGLAS ESTRICTAS:
-                        1. NO TE SALTES NADA: Extrae todas las filas que correspondan a productos.
-                        2. IGNORAR ENCABEZADOS: Textos que no tienen precio ni cantidad NO SON PRODUCTOS.
-                        3. CÓDIGO DIVIDIDO: Si un 'codigo' (Part Number) está dividido en dos líneas por un salto de línea (ej. termina en guion y sigue abajo), únelo obligatoriamente en un solo texto continuo.
+                        1. NO TE SALTES NADA: Extrae todas las filas de productos.
+                        2. CÓDIGO DIVIDIDO: Si un 'codigo' está dividido en dos líneas, únelo.
+                        3. COSTO UNITARIO CORRECTO: El 'costo_unitario' es el PRIMER precio que aparece después de la cantidad. ¡NUNCA MULTIPLIQUES! ¡NUNCA uses el Amount total!
                         Schema JSON esperado:
                         {{
                           "productos": [{{"codigo": "PART NUMBER", "cantidad": 0, "costo_unitario": "0.00"}}]
@@ -290,7 +289,6 @@ with tab2:
                     with pdfplumber.open(pdf_inv_m) as pdf:
                         for page in pdf.pages:
                             text = optimizar_tokens(page.extract_text(layout=False))
-                            # BLINDAJE 1: Unimos cualquier código roto por guiones (ej. DH-SDT6C425-4P-GB-APV-0280)
                             text = re.sub(r'-\s*\n\s*', '-', text)
                             if text: paginas_inv_m.append(text + "\n")
                     
@@ -310,13 +308,13 @@ with tab2:
                     for idx, chunk in enumerate(chunks_inv_m):
                         status_inv_m.text(f"⏳ Extrayendo Factura: Página {idx+1}/{len(chunks_inv_m)}...")
                         
-                        # BLINDAJE 2: Prompt ultra estricto para evitar POs y saltos
-                        prompt_prod_inv_m = f"""Analiza esta página y extrae TODOS los productos.
+                        prompt_prod_inv_m = f"""Analiza esta página de Factura (Invoice) y extrae TODOS los productos.
                         REGLAS DE VIDA O MUERTE (Si fallas, el sistema colapsa):
-                        1. ¡PROHIBIDO USAR EL PO!: La última columna (ej. DH-S256260330 o DH-S256260330-1) es una Orden de Compra. NUNCA la pongas como 'codigo'. El código real SIEMPRE está a la izquierda.
-                        2. NO OMITAS PRODUCTOS: Si ves una CANTIDAD y un PRECIO UNITARIO, es un producto válido. Cópialo sin importar si el código es corto (S5PRO) o tiene paréntesis.
-                        3. CÓDIGOS ROTOS: Si el texto dice "DH-SDT6C425-4P-GB-APV-" y abajo dice "0280", debes extraerlo completo como "DH-SDT6C425-4P-GB-APV-0280".
-                        4. IGNORA TEXTOS SUELTOS: Ignora categorías (ej. "DOOR ACCESS CONTROLLER") que no tengan precio.
+                        1. ¡PROHIBIDO USAR EL PO!: La última columna (ej. DH-S256260330) es la Orden de Compra (PO). NUNCA la pongas como código.
+                        2. ¡COSTO UNITARIO CORRECTO!: El costo unitario es SIEMPRE el PRIMER monto que aparece inmediatamente después de la cantidad. 
+                           NUNCA TÓMES EL ÚLTIMO NÚMERO (Ese es el Amount/Total). ¡NUNCA MULTIPLIQUES LA CANTIDAD POR EL PRECIO!
+                           Ejemplo: "8 | 450.0000 | 3600.00" -> cantidad = 8, costo_unitario = 450.00
+                        3. CÓDIGOS ROTOS: Únelos siempre. "DH-SDT6C425-4P-GB-APV-" y en la otra linea "0280" forman "DH-SDT6C425-4P-GB-APV-0280".
                         Schema JSON:
                         {{ "productos": [{{"codigo": "PART NUMBER", "cantidad": 0, "costo_unitario": "0.00"}}] }}
                         Texto:
@@ -349,9 +347,12 @@ with tab2:
                         
                         prompt_prod_pl_m = f"""Analiza esta página del PACKING LIST.
                         REGLAS DE VIDA O MUERTE:
-                        1. EXTRAE TODAS LAS FILAS con Quantity(PCS), Gr.wt(KGS) y Measurement(CBMS).
+                        1. LÓGICA DE COLUMNAS CORRECTA: Las columnas de números son: [CTNS] [PCS] [Gr.wt] [Net Wt] [CBMS].
+                           - 'cantidad': Tienes que extraer los PCS (Pieces). Es decir, el SEGUNDO número entero después del código. ¡NO TOMES LOS CTNS (Bultos)!
+                           - 'kgs': Es el TERCER número (Gr.wt).
+                           - 'cbms': Es el ÚLTIMO número de la fila.
+                           Ejemplo: "25 | 500 | 230 | 205 | 1.925" -> cantidad=500, kgs=230, cbms=1.925
                         2. CÓDIGOS ROTOS: Si un código está partido, únelo (ej. DH-SDT6C...0280).
-                        3. CANTIDAD: Extrae obligatoriamente la cantidad de piezas.
                         Schema JSON:
                         {{ "productos": [{{"codigo": "PART NUMBER", "cantidad": 0, "kgs": "0.00", "cbms": "0.00"}}] }}
                         Texto:
@@ -375,7 +376,6 @@ with tab2:
                     else:
                         # --- Limpieza de Factura ---
                         df_factura_m['codigo'] = df_factura_m['codigo'].astype(str).str.strip().str.upper()
-                        # BLINDAJE 3: Eliminamos por la fuerza si la IA coló algún "DH-S" (Los PO numbers)
                         df_factura_m = df_factura_m[~df_factura_m['codigo'].str.startswith('DH-S256')]
                         
                         df_factura_m['codigo_clean'] = df_factura_m['codigo'].apply(normalizar_codigo_cruce)
@@ -390,14 +390,12 @@ with tab2:
                         recargo_m = parse_monto_seguro(ajustes_m.get("recargo", "0.0"))
                         total_neto_real_m = parse_monto_seguro(json_factura_m.get("totales", {}).get("total_neto_final", "0.0"))
 
-                        # BLINDAJE 4: Seguro matemático absoluto contra alucinaciones.
-                        # El flete jamás debería superar el 20% de la factura. Si es un valor gigante, lo ignoramos.
                         suma_ajustes = flete_m + descuento_m + recargo_m
                         if suma_ajustes > 0 and suma_ajustes < (total_neto_real_m * 0.20):
                             suma_bruta_m = (df_factura_m['cantidad'] * df_factura_m['costo_unitario']).sum()
                             factor_m = total_neto_real_m / suma_bruta_m if suma_bruta_m > 0 else 1.0
                         else:
-                            factor_m = 1.0 # Se mantiene el costo original intacto
+                            factor_m = 1.0
                         
                         df_factura_m['costo_final'] = (df_factura_m['costo_unitario'] * factor_m).round(3)
 
@@ -408,7 +406,6 @@ with tab2:
 
                         # --- Limpieza de Packing List ---
                         df_packing_m['codigo'] = df_packing_m['codigo'].astype(str).str.strip().str.upper()
-                        # Borrado de emergencia por si se coló un PO
                         df_packing_m = df_packing_m[~df_packing_m['codigo'].str.startswith('DH-S256')]
                         
                         df_packing_m['codigo_clean'] = df_packing_m['codigo'].apply(normalizar_codigo_cruce)
