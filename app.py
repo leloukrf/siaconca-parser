@@ -114,7 +114,12 @@ def preguntar_ia(prompt_texto):
                         # razonamiento se comía todo el presupuesto y el JSON salía cortado
                         # (json_validate_failed). Subimos el límite y bajamos el esfuerzo de
                         # razonamiento al mínimo, ya que esta tarea es extracción, no lógica compleja.
-                        max_tokens=8000,
+                        # OJO: Groq (tier gratis on_demand) tiene un límite de 8000 tokens POR
+                        # MINUTO, y ese límite cuenta el max_tokens que pides + el prompt, no lo
+                        # que realmente se usa. Pedir 8000 de max_tokens ya agota el presupuesto
+                        # del minuto por sí solo. Lo bajamos a un valor que deje margen para el
+                        # prompt (ver TAMANO_LOTE más abajo, también reducido).
+                        max_tokens=3500,
                         reasoning_effort=reasoning_por_modelo.get(modelo, "low"),
                         response_format={"type": "json_object"}
                     )
@@ -147,7 +152,7 @@ def preguntar_ia(prompt_texto):
             res = client_genai.models.generate_content(
                 model='gemini-3.5-flash',
                 contents="Return ONLY JSON. Extract absolutely all items.\n\n" + prompt_texto,
-                config={"response_mime_type": "application/json", "temperature": 0.0}
+                config={"response_mime_type": "application/json", "temperature": 0.0, "max_output_tokens": 8192}
             )
             return json.loads(res.text)
         except Exception as e:
@@ -167,7 +172,7 @@ def preguntar_ia(prompt_texto):
                 # la petición entre los modelos gratis disponibles en cada momento
                 "messages": [{"role": "system", "content": "Return ONLY JSON."}, {"role": "user", "content": prompt_texto}],
                 "temperature": 0.0,
-                "max_tokens": 4000
+                "max_tokens": 6000
             }
             response_or = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers_or, json=data_or, timeout=60)
 
@@ -230,7 +235,7 @@ with tab1:
                     datos = preguntar_ia(prompt_global)
 
                     productos_totales = []
-                    TAMANO_LOTE = 3  # páginas por llamada a la IA (antes: 1). Baja este número
+                    TAMANO_LOTE = 2  # páginas por llamada a la IA (antes: 1). Baja este número
                     # si tus facturas tienen tablas muy densas y notas que la IA trunca resultados.
                     chunks = [paginas_texto[i:i+TAMANO_LOTE] for i in range(0, len(paginas_texto), TAMANO_LOTE)]
                     progreso_simple = st.progress(0)
@@ -358,7 +363,7 @@ with tab2:
                     Texto: {texto_global_inv_m}""")
 
                     productos_factura_m = []
-                    TAMANO_LOTE = 3  # páginas por llamada a la IA (antes: 1)
+                    TAMANO_LOTE = 2  # páginas por llamada a la IA (antes: 1)
                     chunks_inv_m = [paginas_inv_m[i:i+TAMANO_LOTE] for i in range(0, len(paginas_inv_m), TAMANO_LOTE)]
                     progreso_inv_m = st.progress(0)
                     status_inv_m = st.empty()
@@ -403,7 +408,7 @@ with tab2:
                             if text: paginas_pl_m.append(text + "\n")
 
                     productos_packing_m = []
-                    TAMANO_LOTE = 3  # páginas por llamada a la IA (antes: 1)
+                    TAMANO_LOTE = 2  # páginas por llamada a la IA (antes: 1)
                     chunks_pl_m = [paginas_pl_m[i:i+TAMANO_LOTE] for i in range(0, len(paginas_pl_m), TAMANO_LOTE)]
                     progreso_pl_m = st.progress(0)
                     status_pl_m = st.empty()
