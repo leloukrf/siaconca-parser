@@ -279,6 +279,11 @@ with tab1:
                     if items:
                         df_temp = pd.DataFrame(items)
                         df_temp['codigo'] = df_temp['codigo'].astype(str).str.strip().str.upper()
+                        # Los códigos reales nunca traen espacios. Si la IA pegó por error
+                        # una palabra suelta de otra columna (ej. el final de un PO partido
+                        # en dos líneas: "DH-S256260529-" / "ECO"), esto se queda solo con
+                        # el primer token, que es el código de verdad.
+                        df_temp['codigo'] = df_temp['codigo'].str.split().str[0]
                         df_temp['descripcion'] = df_temp['codigo'] 
                         df_temp['cantidad'] = pd.to_numeric(df_temp['cantidad'], errors='coerce').fillna(0)
                         df_temp = df_temp[df_temp['cantidad'] > 0].copy()
@@ -367,7 +372,12 @@ with tab2:
                         2. ¡COSTO UNITARIO CORRECTO!: El costo unitario es SIEMPRE el PRIMER monto que aparece inmediatamente después de la cantidad. 
                            NUNCA TÓMES EL ÚLTIMO NÚMERO (Ese es el Amount/Total). ¡NUNCA MULTIPLIQUES LA CANTIDAD POR EL PRECIO!
                            Ejemplo: "8 | 450.0000 | 3600.00" -> cantidad = 8, costo_unitario = 450.00
-                        3. CÓDIGOS ROTOS: Únelos siempre. "DH-SDT6C425-4P-GB-APV-" y en la otra linea "0280" forman "DH-SDT6C425-4P-GB-APV-0280".
+                        3. CÓDIGOS ROTOS: Únelos siempre, PERO SOLO dentro de la MISMA columna de código.
+                           "DH-SDT6C425-4P-GB-APV-" y en la otra linea "0280" forman "DH-SDT6C425-4P-GB-APV-0280".
+                        4. ¡OJO! La columna del PO (la última) también se parte en dos líneas a veces
+                           (ej. "DH-S256260529-" y en la línea de abajo "ECO"). Esa palabra suelta de abajo
+                           PERTENECE AL PO, no al código del producto. NUNCA la pegues al campo "codigo".
+                           El campo "codigo" JAMÁS debe contener espacios ni la palabra "ECO" u otras palabras sueltas.
                         Schema JSON:
                         {{ "productos": [{{"codigo": "PART NUMBER", "cantidad": 0, "costo_unitario": "0.00"}}] }}
                         Texto:
@@ -432,6 +442,11 @@ with tab2:
                     else:
                         # --- Limpieza de Factura ---
                         df_factura_m['codigo'] = df_factura_m['codigo'].astype(str).str.strip().str.upper()
+                        # Los códigos reales nunca traen espacios. Si la IA pegó por error
+                        # una palabra suelta de otra columna (ej. el final de un PO partido
+                        # en dos líneas: "DH-S256260529-" / "ECO"), esto se queda solo con
+                        # el primer token, que es el código de verdad.
+                        df_factura_m['codigo'] = df_factura_m['codigo'].str.split().str[0]
                         df_factura_m = df_factura_m[~df_factura_m['codigo'].str.startswith('DH-S256')]
                         
                         df_factura_m['codigo_clean'] = df_factura_m['codigo'].apply(normalizar_codigo_cruce)
@@ -462,6 +477,7 @@ with tab2:
 
                         # --- Limpieza de Packing List ---
                         df_packing_m['codigo'] = df_packing_m['codigo'].astype(str).str.strip().str.upper()
+                        df_packing_m['codigo'] = df_packing_m['codigo'].str.split().str[0]
                         df_packing_m = df_packing_m[~df_packing_m['codigo'].str.startswith('DH-S256')]
                         
                         df_packing_m['codigo_clean'] = df_packing_m['codigo'].apply(normalizar_codigo_cruce)
